@@ -46,7 +46,7 @@ let geofenceCircle = L.circle([homeLat, homeLon], {
 
 // สร้างหมุดตัวแทนผู้ป่วย (มือถือจริง) สีแดง
 const patientIcon = L.icon({
-    iconUrl: 'GeoBelt.png',
+    iconUrl: 'GeoBelt1.png',
     shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
     iconSize: [25, 41],
     iconAnchor: [12, 41],
