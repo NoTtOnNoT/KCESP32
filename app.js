@@ -2,6 +2,12 @@
 const FIREBASE_URL = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatabase.app/esp32_telemetry.json";
 const FIREBASE_CONFIG_URL = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatabase.app/home_config.json";
 
+// ===================== ตั้งค่า Telegram Bot =====================
+const TELEGRAM_BOT_TOKEN = "8839107909:AAEw_v3RKagQYerl38WIRtmRYf0rc3oDVqY"; // แทนที่ด้วย Token ที่ได้จาก BotFather
+const TELEGRAM_CHAT_ID = "8530891463";       // แทนที่ด้วย Chat ID ของคุณ
+let lastZoneState = null;                           // ตัวแปรป้องกันการส่งข้อความซ้ำรัวๆ
+// ==============================================================
+
 // ตั้งค่าธีมเริ่มต้นจาก localStorage
 const savedTheme = localStorage.getItem('theme') || 'dark';
 if (savedTheme === 'light') {
@@ -90,6 +96,32 @@ function addLog(message) {
     const logItem = document.createElement('div');
     logItem.innerHTML = `<span class="text-slate-500">[${timeStr}]</span> ${message}`;
     logBox.prepend(logItem);
+}
+
+// ฟังก์ชันส่งข้อความเข้า Telegram Bot
+async function sendTelegramAlert(message) {
+    if (!TELEGRAM_BOT_TOKEN || TELEGRAM_BOT_TOKEN === "YOUR_BOT_TOKEN_HERE" || 
+        !TELEGRAM_CHAT_ID || TELEGRAM_CHAT_ID === "YOUR_CHAT_ID_HERE") {
+        return; // หากยังไม่ได้ใส่ Token หรือ Chat ID ให้ข้ามไป
+    }
+
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    const payload = {
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: 'Markdown'
+    };
+
+    try {
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        addLog("ส่งแจ้งเตือนเข้า Telegram สำเร็จ");
+    } catch (error) {
+        console.error("Telegram Error:", error);
+    }
 }
 
 function updateHomeOnMap() {
@@ -238,6 +270,7 @@ function centerToDevice() {
     }
 }
 
+// ตรวจสอบ Geofence พร้อมระบบส่ง Telegram อัตโนมัติ
 function checkGeofence(coords) {
     const distance = map.distance([coords.lat, coords.lon], [homeLat, homeLon]);
     document.getElementById('distance-text').innerText = `ระยะห่างจากบ้าน: ${distance.toFixed(1)} เมตร`;
@@ -246,11 +279,27 @@ function checkGeofence(coords) {
     const cardZone = document.getElementById('card-zone');
     cardZone.classList.remove('hidden');
 
-    if (distance <= homeRadius) {
+    const currentState = (distance <= homeRadius) ? 'IN' : 'OUT';
+
+    if (currentState === 'IN') {
         statusEl.innerHTML = '<span class="text-emerald-500 font-extrabold flex items-center gap-1">🏠 อยู่ในบ้าน (In Zone)</span>';
+        
+        // ถ้าสถานะเดิมเคยอยู่นอกบ้าน แล้วเพิ่งกลับเข้าบ้าน
+        if (lastZoneState === 'OUT') {
+            sendTelegramAlert(`🏠 *แจ้งเตือน*: อุปกรณ์กลับเข้าสู่พื้นที่บ้านแล้ว!\n📍 ระยะห่าง: ${distance.toFixed(1)} เมตร`);
+        }
     } else {
         statusEl.innerHTML = '<span class="text-amber-500 font-extrabold flex items-center gap-1">🚗 ออกนอกบ้าน (Out of Zone)</span>';
+        
+        // ถ้าสถานะเดิมเคยอยู่ในบ้าน แล้วเพิ่งออกนอกบ้าน (ส่งเตือนครั้งเดียวเพื่อไม่ให้สแปม)
+        if (lastZoneState === 'IN' || lastZoneState === null) {
+            const mapsLink = `https://www.google.com/maps?q=${coords.lat},${coords.lon}`;
+            const msg = `🚨 *แจ้งเตือนฉุกเฉิน!*\n🚗 อุปกรณ์ออกนอกพื้นที่บ้านแล้ว!\n📏 ระยะห่าง: ${distance.toFixed(1)} เมตร\n📍 พิกัด: ${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)}\n🔗 [คลิกเปิดดูบน Google Maps](${mapsLink})`;
+            sendTelegramAlert(msg);
+        }
     }
+    
+    lastZoneState = currentState;
 }
 
 function parseGPS(gpsString) {
@@ -298,7 +347,6 @@ function parseGPS(gpsString) {
     return null;
 }
 
-// สร้างไอคอนหมุดตามประเภทพิกัด (GPS = เขียว 🛰️, LBS = ส้ม 📡)
 function createDeviceIcon(type) {
     const isGps = (type === 'GPS');
     return L.divIcon({
@@ -360,7 +408,6 @@ async function fetchFirebaseData() {
                 if (coords) {
                     lastDeviceCoords = coords;
                     
-                    let typeText = coords.type === 'GPS' ? '🛰️ พิกัดดาวเทียม (แม่นยำสูง)' : '⚠️ 📡 พิกัดเสามือถือ LBS (ความแม่นยำต่ำ)';
                     document.getElementById('lat-lon-text').innerHTML = `Latitude: ${coords.lat.toFixed(6)}, Longitude: ${coords.lon.toFixed(6)} (<span class="${coords.type === 'GPS' ? 'text-emerald-400' : 'text-amber-400 font-bold'}">${coords.type}</span>)`;
 
                     let popupText = coords.type === 'GPS' ? "<b>🛰️ ตำแหน่งดาวเทียม GPS</b>" : "<b>📡 ตำแหน่งเสามือถือ LBS (ความแม่นยำต่ำ)</b>";
