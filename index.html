@@ -18,7 +18,7 @@
 </head>
 <body class="bg-slate-900 text-slate-100 font-sans antialiased min-h-screen flex flex-col justify-between transition-colors duration-300">
 
-    <div class="container mx-auto p-4 md:p-6 max-w-6xl flex-grow">
+    <div class="container mx-auto p-4 md:p-6 max-w-7xl flex-grow">
         <!-- Header -->
         <header class="theme-panel border border-slate-700/50 rounded-3xl p-6 mb-6 flex flex-col md:flex-row justify-between items-center shadow-xl">
             <div class="flex items-center space-x-4 mb-4 md:mb-0">
@@ -41,8 +41,8 @@
             </div>
         </header>
 
-        <!-- Cards Grid -->
-        <div id="metrics-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <!-- Cards Grid (รองรับ 5 การ์ดรวมแบตเตอรี่) -->
+        <div id="metrics-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
             <div id="card-temp" class="dashboard-card theme-card rounded-2xl p-5 border-l-4 border-rose-500 hidden">
                 <p class="text-slate-400 text-xs font-semibold tracking-wider uppercase">อุณหภูมิห้อง</p>
                 <p class="text-3xl font-black theme-text-primary mt-1"><span id="temp-val">--</span> <span class="text-sm font-normal text-slate-400">°C</span></p>
@@ -50,6 +50,10 @@
             <div id="card-hum" class="dashboard-card theme-card rounded-2xl p-5 border-l-4 border-sky-500 hidden">
                 <p class="text-slate-400 text-xs font-semibold tracking-wider uppercase">ความชื้นสัมพัทธ์</p>
                 <p class="text-3xl font-black theme-text-primary mt-1"><span id="hum-val">--</span> <span class="text-sm font-normal text-slate-400">%</span></p>
+            </div>
+            <div id="card-batt" class="dashboard-card theme-card rounded-2xl p-5 border-l-4 border-emerald-400 hidden">
+                <p class="text-slate-400 text-xs font-semibold tracking-wider uppercase">แบตเตอรี่อุปกรณ์</p>
+                <p class="text-3xl font-black theme-text-primary mt-1"><span id="batt-val">--</span> <span class="text-sm font-normal text-slate-400">%</span></p>
             </div>
             <div id="card-gps" class="dashboard-card theme-card rounded-2xl p-5 border-l-4 border-emerald-500 hidden">
                 <p class="text-slate-400 text-xs font-semibold tracking-wider uppercase">สถานะดาวเทียม GPS</p>
@@ -67,7 +71,7 @@
             <div class="lg:col-span-2 theme-card border border-slate-700/60 rounded-3xl p-6 shadow-xl flex flex-col justify-between">
                 <div>
                     <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-3">
-                        <h2 class="text-sm font-bold theme-text-primary flex items-center gap-2">🗺️ แผนที่ Open-Source Tracking</h2>
+                        <h2 class="text-sm font-bold theme-text-primary flex items-center gap-2">🗺️ แผนที่ Live Tracking (Google Tiles)</h2>
                         <div class="flex gap-2">
                             <button onclick="copyCoordinates()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs px-3 py-2 rounded-xl transition font-medium flex items-center space-x-1 border border-slate-600">
                                 <span>📋 คัดลอกพิกัด</span>
@@ -120,11 +124,33 @@
                 <div class="theme-card border border-slate-700/60 rounded-3xl p-6 shadow-xl flex-grow flex flex-col">
                     <h2 class="text-sm font-bold theme-text-primary mb-3 flex items-center justify-between">
                         <span>📜 บันทึกเหตุการณ์</span>
-                        <span class="text-xs text-slate-400 font-normal">Live Log</span>
+                        <button onclick="openHistoryModal()" class="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1.5 rounded-lg transition font-medium flex items-center gap-1">
+                            📊 ดูย้อนหลัง
+                        </button>
                     </h2>
                     <div id="activity-log" class="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 h-40 overflow-y-auto text-xs space-y-2 font-mono">
                         <div class="text-slate-500">ระบบเริ่มต้นทำงานพร้อมเชื่อมต่อ...</div>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: ประวัติข้อมูลย้อนหลัง -->
+    <div id="history-modal" class="fixed inset-0 z-[2000] hidden items-center justify-center bg-black/60 backdrop-blur-sm p-3 md:p-6">
+        <div class="theme-card border border-slate-700/60 rounded-3xl shadow-2xl w-full max-w-4xl max-h-[88vh] flex flex-col overflow-hidden">
+            <div class="flex items-center justify-between p-5 border-b border-slate-700/50 flex-shrink-0">
+                <h2 class="text-base font-bold theme-text-primary flex items-center gap-2">📊 ประวัติข้อมูลย้อนหลัง (แยกตามวัน)</h2>
+                <button onclick="closeHistoryModal()" class="text-slate-400 hover:text-slate-200 text-2xl leading-none px-2">&times;</button>
+            </div>
+            <div class="flex flex-col md:flex-row flex-1 overflow-hidden">
+                <!-- รายการวันที่ -->
+                <div class="md:w-56 flex-shrink-0 border-b md:border-b-0 md:border-r border-slate-700/50 overflow-y-auto p-3 max-h-40 md:max-h-none" id="history-date-list">
+                    <div class="text-xs text-slate-400 text-center py-6">กำลังโหลด...</div>
+                </div>
+                <!-- รายละเอียดข้อมูลของวันที่เลือก -->
+                <div class="flex-1 overflow-y-auto p-4" id="history-day-content">
+                    <div class="text-xs text-slate-400 text-center py-10">เลือกวันที่ทางซ้ายเพื่อดูข้อมูล</div>
                 </div>
             </div>
         </div>
