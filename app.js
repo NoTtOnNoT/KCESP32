@@ -206,6 +206,7 @@ function checkGeofence(coords) {
 }
 
 // 🛠️ ฟังก์ชันแปลงสตริง GPS และ LBS ที่ปรับปรุงใหม่ให้แม่นยำ ตรงกับ Google Earth 100%
+// 🛠️ ฟังก์ชันแปลงสตริง GPS และ LBS ที่ปรับปรุงใหม่ให้ตรงเป๊ะกับ AT+CGNSSINFO ของ A7672E
 function parseGPS(gpsString) {
     if (!gpsString || gpsString === "No Fix" || gpsString.includes("No Fix")) return null;
 
@@ -223,63 +224,39 @@ function parseGPS(gpsString) {
         return null;
     }
 
-    // 2. ทำความสะอาดข้อความ GPS ทั่วไป
+    // 2. ทำความสะอาดข้อความจาก AT+CGNSSINFO
     let cleanStr = gpsString.replace("GPS:", "").replace("+CGNSSINFO:", "").trim();
     const parts = cleanStr.split(',');
 
-    // 3. ค้นหาคู่พิกัดทศนิยมที่ถูกต้อง (Lat อยู่ระหว่าง -90 ถึง 90 และ Lon อยู่ระหว่าง -180 ถึง 180 และมีจุดทศนิยม)
-    for (let i = 0; i < parts.length - 1; i++) {
-        let lat = parseFloat(parts[i]);
-        let lon = parseFloat(parts[i + 1]);
-        
-        if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-            // ตรวจสอบว่าเป็นทศนิยมจริง ๆ (ป้องกันการหยิบเลขสถานะจำนวนเต็มเช่น 3 หรือ 14)
-            if (parts[i].includes('.') && parts[i + 1].includes('.')) {
-                return { lat, lon, type: 'GPS' };
-            }
+    // รูปแบบมาตรฐานของ AT+CGNSSINFO: 
+    // [0]=mode, [1]=satellites, [2]=..., [3]=..., [4]=Latitude, [5]=NS, [6]=Longitude, [7]=EW
+    // ตัวอย่าง: 3,19,16,11,6.6328139,N,100.4212036,E,250604...
+    
+    // ตรวจสอบว่าเป็นรูปแบบที่มีทิศทาง N/S และ E/W กำกับชัดเจนหรือไม่
+    let latVal = NaN, lonVal = NaN;
+
+    for (let i = 0; i < parts.length; i++) {
+        if (parts[i] === 'N' || parts[i] === 'S') {
+            latVal = parseFloat(parts[i - 1]);
+            if (parts[i] === 'S') latVal = -latVal;
+        }
+        if (parts[i] === 'E' || parts[i] === 'W') {
+            lonVal = parseFloat(parts[i - 1]);
+            if (parts[i] === 'W') lonVal = -lonVal;
         }
     }
 
-    // 4. กรณีรูปแบบ NMEA แบบดั้งเดิม (มีทิศทาง N/S, E/W)
-    let hasDirection = parts.some(p => p === 'N' || p === 'S' || p === 'E' || p === 'W');
-    if (parts.length >= 9 || hasDirection) {
-        let latIndex = -1;
-        let lonIndex = -1;
-        
-        for (let i = 0; i < parts.length; i++) {
-            if (parts[i] === 'N' || parts[i] === 'S') {
-                latIndex = i - 1;
-                lonIndex = i + 2;
-                break;
-            }
-        }
+    // ถ้าเจอทิศทางและแปลงค่าได้ถูกต้อง คืนค่าทันที
+    if (!isNaN(latVal) && !isNaN(lonVal) && Math.abs(latVal) <= 90 && Math.abs(lonVal) <= 180) {
+        return { lat: latVal, lon: lonVal, type: 'GPS' };
+    }
 
-        let rawLat = parts[latIndex >= 0 ? latIndex : 4];
-        let latDir = parts[latIndex >= 0 ? latIndex + 1 : 5];
-        let rawLon = parts[lonIndex >= 0 && lonIndex < parts.length ? lonIndex - 1 : 6];
-        let lonDir = parts[lonIndex >= 0 && lonIndex < parts.length ? lonIndex : 7];
-
-        if (rawLat && rawLon) {
-            let lat, lon;
-            if (rawLat.includes('.') && rawLat.indexOf('.') <= 2 && rawLat.indexOf('.') > 0) {
-                lat = parseFloat(rawLat);
-                lon = parseFloat(rawLon);
-            } else {
-                let latDeg = parseInt(rawLat.substring(0, 2));
-                let latMin = parseFloat(rawLat.substring(2));
-                lat = latDeg + (latMin / 60.0);
-
-                let lonDeg = parseInt(rawLon.substring(0, 3));
-                let lonMin = parseFloat(rawLon.substring(3));
-                lon = lonDeg + (lonMin / 60.0);
-            }
-
-            if (latDir === 'S') lat = -lat;
-            if (lonDir === 'W') lon = -lon;
-
-            if (!isNaN(lat) && !isNaN(lon)) {
-                return { lat, lon, type: 'GPS' };
-            }
+    // 3. กรณีสำรอง: ถ้าไม่มีตัวอักษร N/S แต่อยู่ในตำแหน่งช่องที่ 4 และ 6 ตายตัวของ AT+CGNSSINFO
+    if (parts.length >= 7) {
+        let lat = parseFloat(parts[4]);
+        let lon = parseFloat(parts[6]);
+        if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+            return { lat, lon, type: 'GPS' };
         }
     }
 
