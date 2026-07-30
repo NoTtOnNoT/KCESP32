@@ -3,9 +3,9 @@ const FIREBASE_URL = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatab
 const FIREBASE_CONFIG_URL = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatabase.app/home_config.json";
 
 // ===================== ตั้งค่า Telegram Bot =====================
-const TELEGRAM_BOT_TOKEN = "8839107909:AAEw_v3RKagQYerl38WIRtmRYf0rc3oDVqY"; // แทนที่ด้วย Token ที่ได้จาก BotFather
-const TELEGRAM_CHAT_ID = "8530891463";       // แทนที่ด้วย Chat ID ของคุณ
-let lastZoneState = null;                           // ตัวแปรป้องกันการส่งข้อความซ้ำรัวๆ
+const TELEGRAM_BOT_TOKEN = "8839107909:AAEw_v3RKagQYerl38WIRtmRYf0rc3oDVqY"; // Token บอท
+const TELEGRAM_CHAT_ID = "8530891463";                                       // Chat ID 
+let lastZoneState = null;                                                    // ตัวแปรป้องกันการส่งข้อความซ้ำรัวๆ
 // ==============================================================
 
 // ตั้งค่าธีมเริ่มต้นจาก localStorage
@@ -98,11 +98,34 @@ function addLog(message) {
     logBox.prepend(logItem);
 }
 
+// ฟังก์ชันอัปเดต UI แบตเตอรี่แบบเรียลไทม์ (เปลี่ยนสีตามเปอร์เซ็นต์)
+function updateBatteryUI(batteryPercent) {
+    const battVal = document.getElementById('batt-val');
+    const battBar = document.getElementById('batt-bar');
+    const battCard = document.getElementById('card-batt');
+    
+    if (battVal && battBar) {
+        battVal.innerText = batteryPercent;
+        battBar.style.width = batteryPercent + '%';
+
+        if (batteryPercent > 50) {
+            battBar.className = "bg-emerald-500 h-2 rounded-full transition-all duration-500";
+            if(battCard) battCard.style.borderLeftColor = "#10b981"; // สีเขียว
+        } else if (batteryPercent > 20) {
+            battBar.className = "bg-amber-500 h-2 rounded-full transition-all duration-500";
+            if(battCard) battCard.style.borderLeftColor = "#f59e0b"; // สีส้ม
+        } else {
+            battBar.className = "bg-rose-500 h-2 rounded-full transition-all duration-500 animate-pulse";
+            if(battCard) battCard.style.borderLeftColor = "#f43f5e"; // สีแดงกระพริบ (แบตวิกฤต)
+        }
+    }
+}
+
 // ฟังก์ชันส่งข้อความเข้า Telegram Bot
 async function sendTelegramAlert(message) {
     if (!TELEGRAM_BOT_TOKEN || TELEGRAM_BOT_TOKEN === "YOUR_BOT_TOKEN_HERE" || 
         !TELEGRAM_CHAT_ID || TELEGRAM_CHAT_ID === "YOUR_CHAT_ID_HERE") {
-        return; // หากยังไม่ได้ใส่ Token หรือ Chat ID ให้ข้ามไป
+        return; 
     }
 
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -284,14 +307,12 @@ function checkGeofence(coords) {
     if (currentState === 'IN') {
         statusEl.innerHTML = '<span class="text-emerald-500 font-extrabold flex items-center gap-1">🏠 อยู่ในบ้าน (In Zone)</span>';
         
-        // ถ้าสถานะเดิมเคยอยู่นอกบ้าน แล้วเพิ่งกลับเข้าบ้าน
         if (lastZoneState === 'OUT') {
             sendTelegramAlert(`🏠 *แจ้งเตือน*: อุปกรณ์กลับเข้าสู่พื้นที่บ้านแล้ว!\n📍 ระยะห่าง: ${distance.toFixed(1)} เมตร`);
         }
     } else {
         statusEl.innerHTML = '<span class="text-amber-500 font-extrabold flex items-center gap-1">🚗 ออกนอกบ้าน (Out of Zone)</span>';
         
-        // ถ้าสถานะเดิมเคยอยู่ในบ้าน แล้วเพิ่งออกนอกบ้าน (ส่งเตือนครั้งเดียวเพื่อไม่ให้สแปม)
         if (lastZoneState === 'IN' || lastZoneState === null) {
             const mapsLink = `https://www.google.com/maps?q=${coords.lat},${coords.lon}`;
             const msg = `🚨 *แจ้งเตือนฉุกเฉิน!*\n🚗 อุปกรณ์ออกนอกพื้นที่บ้านแล้ว!\n📏 ระยะห่าง: ${distance.toFixed(1)} เมตร\n📍 พิกัด: ${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)}\n🔗 [คลิกเปิดดูบน Google Maps](${mapsLink})`;
@@ -357,42 +378,28 @@ function createDeviceIcon(type) {
     });
 }
 
+// ==============================================================
+// 🌟 ปรับปรุงการดึงข้อมูล Real-time (ดึงแค่ 1 ตัวล่าสุดเท่านั้น)
+// ==============================================================
 async function fetchFirebaseData() {
     try {
-        const response = await fetch(FIREBASE_URL);
+        // ใช้ Query ดึงเฉพาะรายการล่าสุด 1 รายการ เพื่อประหยัดแบนด์วิดท์มหาศาล
+        const url = FIREBASE_URL.replace('.json', '.json?orderBy=%22$key%22&limitToLast=1');
+        const response = await fetch(url);
         const data = await response.json();
         
-        if (data) {
-            const keys = Object.keys(data);
-            const latestKey = keys[keys.length - 1]; 
+        if (data && Object.keys(data).length > 0) {
+            const latestKey = Object.keys(data)[0]; 
             const latestData = data[latestKey];
 
             document.getElementById('status-text').innerText = "ออนไลน์ (Online)";
             document.getElementById('last-update').innerText = "อัปเดตล่าสุด: " + new Date().toLocaleTimeString();
 
-            // อุณหภูมิ
-            const cardTemp = document.getElementById('card-temp');
-            if (latestData.temperature !== undefined && latestData.temperature !== null) {
-                document.getElementById('temp-val').innerText = latestData.temperature;
-                cardTemp.classList.remove('hidden');
-            } else {
-                cardTemp.classList.add('hidden');
-            }
-
-            // ความชื้น
-            const cardHum = document.getElementById('card-hum');
-            if (latestData.humidity !== undefined && latestData.humidity !== null) {
-                document.getElementById('hum-val').innerText = latestData.humidity;
-                cardHum.classList.remove('hidden');
-            } else {
-                cardHum.classList.add('hidden');
-            }
-
-            // แบตเตอรี่
+            // จัดการข้อมูลแบตเตอรี่จริง
             const cardBatt = document.getElementById('card-batt');
             const battVal = latestData.battery !== undefined ? latestData.battery : (latestData.batt !== undefined ? latestData.batt : null);
             if (cardBatt && battVal !== null && battVal !== undefined) {
-                document.getElementById('batt-val').innerText = battVal;
+                updateBatteryUI(parseInt(battVal));
                 cardBatt.classList.remove('hidden');
             } else if (cardBatt) {
                 cardBatt.classList.add('hidden');
@@ -433,6 +440,7 @@ async function fetchFirebaseData() {
         }
     } catch (error) {
         document.getElementById('status-text').innerText = "เชื่อมต่อฐานข้อมูลล้มเหลว";
+        console.error("Firebase fetch error:", error);
     }
 }
 
@@ -495,8 +503,6 @@ async function fetchHistoryData() {
                     time: timeStr,
                     rawTime: dateObj.toTimeString().substring(0, 8),
                     ms: ms,
-                    temperature: (entry.temperature !== undefined && entry.temperature !== null) ? entry.temperature : '-',
-                    humidity: (entry.humidity !== undefined && entry.humidity !== null) ? entry.humidity : '-',
                     battery: battVal,
                     gps: entry.gps || '-'
                 });
@@ -506,6 +512,7 @@ async function fetchHistoryData() {
         renderHistoryDateList();
     } catch (error) {
         listEl.innerHTML = '<div class="text-xs text-rose-400 text-center py-6">โหลดข้อมูลล้มเหลว กรุณาลองใหม่</div>';
+        console.error("History fetch error:", error);
     }
 }
 
@@ -563,12 +570,7 @@ function renderHistoryTableContent() {
         return true;
     });
 
-    const temps = filteredEntries.map(e => e.temperature).filter(v => typeof v === 'number');
-    const hums = filteredEntries.map(e => e.humidity).filter(v => typeof v === 'number');
-    const batts = filteredEntries.map(e => e.battery).filter(v => typeof v === 'number');
-
-    const avgTemp = temps.length ? (temps.reduce((a, b) => a + b, 0) / temps.length).toFixed(1) : '-';
-    const avgHum = hums.length ? (hums.reduce((a, b) => a + b, 0) / hums.length).toFixed(1) : '-';
+    const batts = filteredEntries.map(e => Number(e.battery)).filter(v => !isNaN(v));
     const latestBatt = batts.length ? batts[batts.length - 1] : (filteredEntries.length ? filteredEntries[filteredEntries.length - 1].battery : '-');
 
     let html = `
@@ -586,22 +588,14 @@ function renderHistoryTableContent() {
     </div>
 
     <!-- สถิติย่อย -->
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
-        <div class="bg-slate-900/40 rounded-xl p-2.5 text-center">
-            <p class="text-[10px] text-slate-400 uppercase tracking-wide">แบตเตอรี่ล่าสุด</p>
-            <p class="text-base font-bold text-emerald-400">${latestBatt}${latestBatt !== '-' ? '%' : ''}</p>
+    <div class="grid grid-cols-2 gap-3 mb-4">
+        <div class="bg-slate-900/40 rounded-xl p-3 text-center border border-slate-800">
+            <p class="text-[11px] text-slate-400 uppercase tracking-wide">แบตเตอรี่ล่าสุด</p>
+            <p class="text-lg font-bold text-emerald-400 mt-1">${latestBatt}${latestBatt !== '-' ? '%' : ''}</p>
         </div>
-        <div class="bg-slate-900/40 rounded-xl p-2.5 text-center">
-            <p class="text-[10px] text-slate-400 uppercase tracking-wide">อุณหภูมิเฉลี่ย</p>
-            <p class="text-base font-bold text-white">${avgTemp}°C</p>
-        </div>
-        <div class="bg-slate-900/40 rounded-xl p-2.5 text-center">
-            <p class="text-[10px] text-slate-400 uppercase tracking-wide">ความชื้นเฉลี่ย</p>
-            <p class="text-base font-bold text-white">${avgHum}%</p>
-        </div>
-        <div class="bg-slate-900/40 rounded-xl p-2.5 text-center">
-            <p class="text-[10px] text-slate-400 uppercase tracking-wide">รายการหลังกรอง</p>
-            <p class="text-base font-bold text-white">${filteredEntries.length}</p>
+        <div class="bg-slate-900/40 rounded-xl p-3 text-center border border-slate-800">
+            <p class="text-[11px] text-slate-400 uppercase tracking-wide">รายการหลังกรอง</p>
+            <p class="text-lg font-bold text-white mt-1">${filteredEntries.length}</p>
         </div>
     </div>
 
@@ -615,16 +609,14 @@ function renderHistoryTableContent() {
                     <thead class="sticky top-0 bg-slate-900 z-10 border-b border-slate-800">
                         <tr class="text-left text-slate-400">
                             <th class="py-2.5 px-3 font-semibold">เวลา</th>
-                            <th class="py-2.5 px-3 font-semibold">แบต</th>
-                            <th class="py-2.5 px-3 font-semibold">อุณหภูมิ</th>
-                            <th class="py-2.5 px-3 font-semibold">ความชื้น</th>
+                            <th class="py-2.5 px-3 font-semibold">แบตเตอรี่</th>
                             <th class="py-2.5 px-3 font-semibold">สถานะ / พิกัด</th>
                         </tr>
                     </thead>
                     <tbody>`;
 
     if (filteredEntries.length === 0) {
-        html += `<tr><td colspan="5" class="text-center py-8 text-slate-400">ไม่พบข้อมูลในช่วงเวลาที่กำหนด</td></tr>`;
+        html += `<tr><td colspan="3" class="text-center py-8 text-slate-400">ไม่พบข้อมูลในช่วงเวลาที่กำหนด</td></tr>`;
     } else {
         filteredEntries.forEach((e, idx) => {
             const hasValidCoords = parseGPS(e.gps) !== null;
@@ -638,10 +630,8 @@ function renderHistoryTableContent() {
             html += `
                 <tr class="border-b border-slate-800/60 ${rowStyle}" ${hasValidCoords ? `onclick='selectHistoryRow(${idx}, ${JSON.stringify(JSON.stringify(e))})'` : ''}>
                     <td class="py-2.5 px-3 font-mono text-slate-300 whitespace-nowrap">🕒 ${e.time}</td>
-                    <td class="py-2.5 px-3 text-emerald-400 font-semibold whitespace-nowrap">${e.battery}${e.battery !== '-' ? '%' : ''}</td>
-                    <td class="py-2.5 px-3 text-slate-300 whitespace-nowrap">${e.temperature}${e.temperature !== '-' ? '°C' : ''}</td>
-                    <td class="py-2.5 px-3 text-slate-300 whitespace-nowrap">${e.humidity}${e.humidity !== '-' ? '%' : ''}</td>
-                    <td class="py-2.5 px-3 text-slate-400 truncate max-w-[130px]">${e.gps}</td>
+                    <td class="py-2.5 px-3 text-emerald-400 font-semibold whitespace-nowrap">🔋 ${e.battery}${e.battery !== '-' ? '%' : ''}</td>
+                    <td class="py-2.5 px-3 text-slate-400 truncate max-w-[180px]">${e.gps}</td>
                 </tr>`;
         });
     }
@@ -710,7 +700,7 @@ function selectHistoryRow(index, entryJsonStr) {
     if (infoEl) {
         infoEl.innerHTML = `
             <div>📅 วันที่: <span class="text-white">${currentSelectedDateKey}</span> | ⏰ <span class="text-white">${entry.time}</span></div>
-            <div class="mt-1">🔋 แบต: <span class="text-emerald-400 font-bold">${entry.battery}%</span> | 🌡️ อุณหภูมิ: <span class="text-white">${entry.temperature}°C</span></div>
+            <div class="mt-1">🔋 แบตเตอรี่: <span class="text-emerald-400 font-bold">${entry.battery}%</span></div>
             <div class="mt-1 truncate">📍 พิกัด: <span class="${coords && coords.type === 'GPS' ? 'text-emerald-300' : 'text-amber-300 font-bold'}">${coords ? `${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)} (${coords.type})` : 'ไม่มีพิกัด'}</span></div>
         `;
     }
