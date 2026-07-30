@@ -33,18 +33,90 @@ function toggleTheme() {
 let homeLat = localStorage.getItem('home_lat') ? parseFloat(localStorage.getItem('home_lat')) : 6.632795;
 let homeLon = localStorage.getItem('home_lon') ? parseFloat(localStorage.getItem('home_lon')) : 100.421219;
 let homeRadius = localStorage.getItem('home_radius') ? parseFloat(localStorage.getItem('home_radius')) : 100; // เมตร
-let isSettingHomeMode = false; // ตัวแปรสถานะเปิด/ปิดโหมดคลิกแผนที่
+let isSettingHomeMode = false;
 
 // แสดงค่ารัศมีในฟอร์ม
 document.getElementById('input-home-radius').value = homeRadius;
 
 // เริ่มต้นแผนที่ Leaflet
-let map = L.map('map').setView([homeLat, homeLon], 16);
+// zoomControl ปิดไว้ก่อนเพื่อย้ายไปมุมขวาล่างแบบ Google Maps
+let map = L.map('map', {
+    maxZoom: 20,
+    zoomControl: false
+}).setView([homeLat, homeLon], 17);
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+// ปุ่มซูม +/- สไตล์ Google Maps (มุมขวาล่าง)
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+// ======================================================================
+// 🌍 ชุดแผนที่แบบ Open-Source ที่ปรับให้หน้าตา/ฟีเจอร์ใกล้เคียง Google Maps
+// (ไม่ต้องขอ API Key และไม่มีค่าใช้จ่าย)
+// ======================================================================
+
+// 1. แผนที่ถนน (Roadmap) - สไตล์สะอาด สีสันใกล้เคียง Google Maps
+const cartoVoyager = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    maxZoom: 20,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+});
+
+// 2. แผนที่ถนนมาตรฐาน (OpenStreetMap ดั้งเดิม)
+const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
-    attribution: '&copy; OpenStreetMap contributors'
-}).addTo(map);
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+});
+
+// 3. ภาพถ่ายดาวเทียม (Satellite) ความละเอียดสูง - ให้ความรู้สึกแบบ Google Earth
+const esriSatellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 20,
+    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, swisstopo, and the GIS User Community'
+});
+
+// 3b. ป้ายชื่อถนน/สถานที่/เขตแดน วางทับดาวเทียม (ทำให้กลายเป็นโหมด "แบบผสม/Hybrid" เหมือน Google Maps)
+const esriHybridLabels = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 20,
+    attribution: 'Labels &copy; Esri',
+    pane: 'shadowPane' // วาดทับ tile ปกติแต่ไม่บังหมุด/มาร์คเกอร์
+});
+
+// 4. แผนที่ภูมิประเทศ (Terrain / Topographic)
+const openTopo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+    maxZoom: 17,
+    attribution: 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, SRTM | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)'
+});
+
+// ตั้งค่าเริ่มต้นให้ใช้แผนที่ถนน (Roadmap)
+cartoVoyager.addTo(map);
+
+// ตัวเลือกสลับเลเยอร์แผนที่ (ตั้งชื่อให้คุ้นเคยแบบ Google Maps: Roadmap / Satellite / Terrain / Hybrid)
+const baseMaps = {
+    "🗺️ แผนที่ถนน (Roadmap)": cartoVoyager,
+    "🏙️ แผนที่ถนนคลาสสิก (OpenStreetMap)": osmStandard,
+    "🛰️ ภาพถ่ายดาวเทียม (Satellite)": esriSatellite,
+    "⛰️ แผนที่ภูมิประเทศ (Terrain)": openTopo
+};
+
+// เลเยอร์เสริม: เปิด/ปิดป้ายชื่อบนภาพดาวเทียมเพื่อให้เป็นโหมด Hybrid เหมือน Google Maps/Earth
+const overlayMaps = {
+    "🏷️ ป้ายชื่อถนน/สถานที่ (Hybrid Labels)": esriHybridLabels
+};
+
+L.control.layers(baseMaps, overlayMaps, { collapsed: true }).addTo(map);
+
+// เมื่อผู้ใช้สลับไปโหมดดาวเทียม ให้เปิดป้ายชื่ออัตโนมัติ (กลายเป็นโหมด Hybrid แบบ Google Earth)
+// และเมื่อสลับกลับไปแผนที่ถนน ให้ปิดป้ายชื่อซ้อนออกเพื่อไม่ให้รก
+map.on('baselayerchange', function (e) {
+    if (e.layer === esriSatellite) {
+        if (!map.hasLayer(esriHybridLabels)) {
+            map.addLayer(esriHybridLabels);
+        }
+        addLog("สลับเป็นโหมดภาพถ่ายดาวเทียมแบบ Hybrid (มีป้ายชื่อกำกับ)");
+    } else {
+        if (map.hasLayer(esriHybridLabels)) {
+            map.removeLayer(esriHybridLabels);
+        }
+        addLog(`สลับแผนที่เป็น: ${Object.keys(baseMaps).find(k => baseMaps[k] === e.layer) || 'ไม่ทราบชื่อ'}`);
+    }
+});
 
 let deviceMarker = null;
 let homeMarker = null;
@@ -101,19 +173,19 @@ function toggleMapSelectMode(forceState) {
         btn.classList.add('bg-purple-600', 'hover:bg-purple-700', 'text-white', 'border-purple-500', 'ring-2', 'ring-purple-400');
         btn.innerHTML = '❌ ปิดโหมดคลิกแผนที่';
         instruction.classList.remove('hidden');
-        mapEl.classList.add('map-selecting');
+        mapEl.classList.add('cursor-crosshair');
         addLog("เปิดโหมดเลือกพิกัดบ้านจากแผนที่แล้ว");
     } else {
         btn.classList.remove('bg-purple-600', 'hover:bg-purple-700', 'text-white', 'border-purple-500', 'ring-2', 'ring-purple-400');
         btn.classList.add('bg-slate-700', 'hover:bg-slate-600', 'border-slate-600');
         btn.innerHTML = '🖱️ คลิกเลือกจากแมพ';
         instruction.classList.add('hidden');
-        mapEl.classList.remove('map-selecting');
+        mapEl.classList.remove('cursor-crosshair');
         addLog("ปิดโหมดเลือกพิกัดบ้านจากแผนที่แล้ว");
     }
 }
 
-// เหตุการณ์คลิกบนแผนที่ (ทำงานเฉพาะตอนเปิดโหมดแก้ไขเท่านั้น)
+// เหตุการณ์คลิกบนแผนที่
 map.on('click', function(e) {
     if (!isSettingHomeMode) return;
 
@@ -149,22 +221,50 @@ function saveHomeSettings() {
     if (lastDeviceCoords) checkGeofence(lastDeviceCoords);
 }
 
-// ตั้งค่าพิกัดบ้านด้วยตำแหน่งปัจจุบันของอุปกรณ์
+// 📍 ตั้งค่าพิกัดบ้านด้วยตำแหน่งปัจจุบันของเครื่องที่เปิดเว็บ
 function useCurrentAsHome() {
-    if (!lastDeviceCoords) {
-        alert("ยังไม่ได้รับพิกัดปัจจุบันจากอุปกรณ์ กรุณารอสักครู่");
+    if (!navigator.geolocation) {
+        alert("เบราว์เซอร์ของคุณไม่รองรับการระบุตำแหน่งปัจจุบัน (Geolocation)");
         return;
     }
-    homeLat = lastDeviceCoords.lat;
-    homeLon = lastDeviceCoords.lon;
 
-    localStorage.setItem('home_lat', homeLat);
-    localStorage.setItem('home_lon', homeLon);
+    addLog("กำลังขอพิกัดตำแหน่งปัจจุบันจากอุปกรณ์ของคุณ...");
+    
+    navigator.geolocation.getCurrentPosition(
+        (position) => {
+            homeLat = position.coords.latitude;
+            homeLon = position.coords.longitude;
 
-    updateHomeOnMap();
-    addLog("ตั้งค่าพิกัดบ้านด้วยตำแหน่งปัจจุบันของอุปกรณ์สำเร็จ");
-    alert("ย้ายตำแหน่งบ้านมายังพิกัดปัจจุบันเรียบร้อยแล้ว!");
-    checkGeofence(lastDeviceCoords);
+            localStorage.setItem('home_lat', homeLat);
+            localStorage.setItem('home_lon', homeLon);
+
+            updateHomeOnMap();
+            map.setView([homeLat, homeLon], 18);
+            
+            addLog(`ตั้งค่าบ้านจากตำแหน่งปัจจุบันสำเร็จ: ${homeLat.toFixed(6)}, ${homeLon.toFixed(6)}`);
+            alert("ตั้งค่าบ้านเป็นตำแหน่งปัจจุบันของอุปกรณ์คุณเรียบร้อยแล้ว!");
+
+            if (lastDeviceCoords) {
+                checkGeofence(lastDeviceCoords);
+            }
+        },
+        (error) => {
+            console.error("Geolocation Error:", error);
+            let errorMsg = "ไม่สามารถดึงตำแหน่งปัจจุบันได้ ";
+            if (error.code === error.PERMISSION_DENIED) {
+                errorMsg += "กรุณาอนุญาตสิทธิ์การเข้าถึงตำแหน่งในเบราว์เซอร์";
+            } else {
+                errorMsg += "กรุณาตรวจสอบการเปิด GPS หรือสัญญาณอินเทอร์เน็ต";
+            }
+            alert(errorMsg);
+            addLog("เกิดข้อผิดพลาดในการดึงตำแหน่งปัจจุบัน: " + error.message);
+        },
+        {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 0
+        }
+    );
 }
 
 // ฟังก์ชันคัดลอกพิกัด
@@ -183,7 +283,7 @@ function copyCoordinates() {
 // ซูมไปที่ตำแหน่งอุปกรณ์
 function centerToDevice() {
     if (lastDeviceCoords) {
-        map.setView([lastDeviceCoords.lat, lastDeviceCoords.lon], 17);
+        map.setView([lastDeviceCoords.lat, lastDeviceCoords.lon], 18);
     } else {
         alert("ยังไม่พบตำแหน่งพิกัดจากอุปกรณ์");
     }
@@ -205,12 +305,10 @@ function checkGeofence(coords) {
     }
 }
 
-// 🛠️ ฟังก์ชันแปลงสตริง GPS และ LBS ที่ปรับปรุงใหม่ให้แม่นยำ ตรงกับ Google Earth 100%
-// 🛠️ ฟังก์ชันแปลงสตริง GPS และ LBS ที่ปรับปรุงใหม่ให้ตรงเป๊ะกับ AT+CGNSSINFO ของ A7672E
+// ฟังก์ชันแปลงสตริง GPS และ LBS
 function parseGPS(gpsString) {
     if (!gpsString || gpsString === "No Fix" || gpsString.includes("No Fix")) return null;
 
-    // 1. รองรับรูปแบบ LBS (เช่น LBS:0,6.632448,100.422928,550)
     if (gpsString.startsWith("LBS:")) {
         let lbsClean = gpsString.replace("LBS:", "").trim();
         const parts = lbsClean.split(',');
@@ -224,15 +322,9 @@ function parseGPS(gpsString) {
         return null;
     }
 
-    // 2. ทำความสะอาดข้อความจาก AT+CGNSSINFO
     let cleanStr = gpsString.replace("GPS:", "").replace("+CGNSSINFO:", "").trim();
     const parts = cleanStr.split(',');
 
-    // รูปแบบมาตรฐานของ AT+CGNSSINFO: 
-    // [0]=mode, [1]=satellites, [2]=..., [3]=..., [4]=Latitude, [5]=NS, [6]=Longitude, [7]=EW
-    // ตัวอย่าง: 3,19,16,11,6.6328139,N,100.4212036,E,250604...
-    
-    // ตรวจสอบว่าเป็นรูปแบบที่มีทิศทาง N/S และ E/W กำกับชัดเจนหรือไม่
     let latVal = NaN, lonVal = NaN;
 
     for (let i = 0; i < parts.length; i++) {
@@ -246,12 +338,10 @@ function parseGPS(gpsString) {
         }
     }
 
-    // ถ้าเจอทิศทางและแปลงค่าได้ถูกต้อง คืนค่าทันที
     if (!isNaN(latVal) && !isNaN(lonVal) && Math.abs(latVal) <= 90 && Math.abs(lonVal) <= 180) {
         return { lat: latVal, lon: lonVal, type: 'GPS' };
     }
 
-    // 3. กรณีสำรอง: ถ้าไม่มีตัวอักษร N/S แต่อยู่ในตำแหน่งช่องที่ 4 และ 6 ตายตัวของ AT+CGNSSINFO
     if (parts.length >= 7) {
         let lat = parseFloat(parts[4]);
         let lon = parseFloat(parts[6]);

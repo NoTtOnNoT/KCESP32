@@ -25,7 +25,7 @@
                 <div class="w-12 h-12 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center text-2xl shadow-lg shadow-indigo-500/30">🛰️</div>
                 <div>
                     <h1 class="text-xl md:text-2xl font-extrabold tracking-tight theme-text-primary">ESP32 Live Telemetry</h1>
-                    <p class="text-slate-400 text-xs md:text-sm">A7672E 4G LTE + GPS Realtime Tracking System</p>
+                    <p class="text-slate-400 text-xs md:text-sm">A7672E 4G LTE + GPS Realtime Tracking System (Open-Source)</p>
                 </div>
             </div>
             <div class="flex items-center space-x-3">
@@ -41,24 +41,20 @@
             </div>
         </header>
 
-        <!-- Cards Grid (แสดงผลเฉพาะข้อมูลที่มีจริงเท่านั้น) -->
+        <!-- Cards Grid -->
         <div id="metrics-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            <!-- อุณหภูมิ -->
             <div id="card-temp" class="dashboard-card theme-card rounded-2xl p-5 border-l-4 border-rose-500 hidden">
                 <p class="text-slate-400 text-xs font-semibold tracking-wider uppercase">อุณหภูมิห้อง</p>
                 <p class="text-3xl font-black theme-text-primary mt-1"><span id="temp-val">--</span> <span class="text-sm font-normal text-slate-400">°C</span></p>
             </div>
-            <!-- ความชื้น -->
             <div id="card-hum" class="dashboard-card theme-card rounded-2xl p-5 border-l-4 border-sky-500 hidden">
                 <p class="text-slate-400 text-xs font-semibold tracking-wider uppercase">ความชื้นสัมพัทธ์</p>
                 <p class="text-3xl font-black theme-text-primary mt-1"><span id="hum-val">--</span> <span class="text-sm font-normal text-slate-400">%</span></p>
             </div>
-            <!-- สถานะ GPS -->
             <div id="card-gps" class="dashboard-card theme-card rounded-2xl p-5 border-l-4 border-emerald-500 hidden">
                 <p class="text-slate-400 text-xs font-semibold tracking-wider uppercase">สถานะดาวเทียม GPS</p>
                 <p class="text-xs font-bold theme-text-secondary mt-2 truncate" id="gps-status">กำลังรอสัญญาณ...</p>
             </div>
-            <!-- สถานะพื้นที่ (Geofence) -->
             <div id="card-zone" class="dashboard-card theme-card rounded-2xl p-5 border-l-4 border-purple-500 hidden">
                 <p class="text-slate-400 text-xs font-semibold tracking-wider uppercase">สถานะพื้นที่บ้าน</p>
                 <p class="text-base font-bold theme-text-primary mt-1" id="home-zone-status">🏠 กำลังตรวจสอบ...</p>
@@ -67,11 +63,11 @@
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-            <!-- แผนที่หลัก (กินพื้นที่ 2 คอลัมน์) -->
+            <!-- แผนที่หลัก -->
             <div class="lg:col-span-2 theme-card border border-slate-700/60 rounded-3xl p-6 shadow-xl flex flex-col justify-between">
                 <div>
                     <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-3">
-                        <h2 class="text-sm font-bold theme-text-primary flex items-center gap-2">🗺️ แผนที่ติดตามตำแหน่งอุปกรณ์</h2>
+                        <h2 class="text-sm font-bold theme-text-primary flex items-center gap-2">🗺️ แผนที่ Open-Source Tracking</h2>
                         <div class="flex gap-2">
                             <button onclick="copyCoordinates()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs px-3 py-2 rounded-xl transition font-medium flex items-center space-x-1 border border-slate-600">
                                 <span>📋 คัดลอกพิกัด</span>
@@ -91,12 +87,10 @@
 
             <!-- แผงตั้งค่า Geofence และประวัติกิจกรรม -->
             <div class="flex flex-col gap-6">
-                <!-- ตั้งค่า Geofence -->
                 <div class="theme-card border border-slate-700/60 rounded-3xl p-6 shadow-xl">
                     <h2 class="text-sm font-bold theme-text-primary mb-3">⚙️ ตั้งค่าขอบเขตบ้าน</h2>
                     
                     <div class="space-y-3">
-                        <!-- ปุ่มตั้งค่าตำแหน่งบ้าน 2 รูปแบบ -->
                         <div class="grid grid-cols-2 gap-2">
                             <button onclick="useCurrentAsHome()" class="bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-2.5 rounded-xl transition font-medium shadow-lg shadow-purple-600/20 flex items-center justify-center gap-1">
                                 📍 ตำแหน่งปัจจุบัน
@@ -106,12 +100,10 @@
                             </button>
                         </div>
 
-                        <!-- คำแนะนำเมื่อเปิดโหมดคลิกแผนที่ -->
                         <div id="mode-instruction" class="text-xs text-purple-300 bg-purple-950/40 p-3 rounded-xl border border-purple-500/40 leading-relaxed hidden">
                             🎯 <b>โหมดแก้ไขเปิดอยู่:</b> กรุณาคลิกซ้ายบนตำแหน่งที่ต้องการบนแผนที่เพื่อตั้งเป็นบ้าน
                         </div>
 
-                        <!-- ตั้งค่ารัศมี -->
                         <div class="pt-2">
                             <label class="block text-xs font-medium text-slate-400 mb-1">รัศมีแจ้งเตือนรอบบ้าน (เมตร)</label>
                             <div class="flex space-x-2">
@@ -124,7 +116,7 @@
                     </div>
                 </div>
 
-                <!-- ประวัติกิจกรรม (Activity Log) -->
+                <!-- ประวัติกิจกรรม -->
                 <div class="theme-card border border-slate-700/60 rounded-3xl p-6 shadow-xl flex-grow flex flex-col">
                     <h2 class="text-sm font-bold theme-text-primary mb-3 flex items-center justify-between">
                         <span>📜 บันทึกเหตุการณ์</span>
@@ -138,7 +130,6 @@
         </div>
     </div>
 
-    <!-- Footer -->
     <footer class="text-center py-6 text-xs text-slate-500 border-t border-slate-800 mt-6">
         ESP32 + A7672E Advanced Telemetry Platform &copy; 2026
     </footer>
