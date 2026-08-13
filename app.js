@@ -3,9 +3,9 @@ const FIREBASE_URL = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatab
 const FIREBASE_CONFIG_URL = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatabase.app/home_config.json";
 
 // ===================== ตั้งค่า Telegram Bot =====================
-const TELEGRAM_BOT_TOKEN = "8839107909:AAEw_v3RKagQYerl38WIRtmRYf0rc3oDVqY"; // Token บอท
-const TELEGRAM_CHAT_ID = "8530891463";                                       // Chat ID 
-let lastZoneState = null;                                                    // ตัวแปรป้องกันการส่งข้อความซ้ำรัวๆ
+const TELEGRAM_BOT_TOKEN = "8839107909:AAEw_v3RKagQYerl38WIRtmRYf0rc3oDVqY"; 
+const TELEGRAM_CHAT_ID = "8530891463";                                      
+let lastZoneState = null;                                                   
 // ==============================================================
 
 // ตั้งค่าธีมเริ่มต้นจาก localStorage
@@ -51,7 +51,7 @@ let map = L.map('map', {
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 
 const GOOGLE_SUBDOMAINS = ['mt0', 'mt1', 'mt2', 'mt3'];
-const GOOGLE_ATTRIBUTION = '&copy; Google Maps';
+const GOOGLE_ATTRIBUTION = '© Google Maps';
 
 const googleRoadmap = L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
     maxZoom: 21, subdomains: GOOGLE_SUBDOMAINS, attribution: GOOGLE_ATTRIBUTION
@@ -98,7 +98,7 @@ function addLog(message) {
     logBox.prepend(logItem);
 }
 
-// ฟังก์ชันอัปเดต UI แบตเตอรี่แบบเรียลไทม์ (เปลี่ยนสีตามเปอร์เซ็นต์)
+// ฟังก์ชันอัปเดต UI แบตเตอรี่แบบเรียลไทม์
 function updateBatteryUI(batteryPercent) {
     const battVal = document.getElementById('batt-val');
     const battBar = document.getElementById('batt-bar');
@@ -110,13 +110,13 @@ function updateBatteryUI(batteryPercent) {
 
         if (batteryPercent > 50) {
             battBar.className = "bg-emerald-500 h-2 rounded-full transition-all duration-500";
-            if(battCard) battCard.style.borderLeftColor = "#10b981"; // สีเขียว
+            if(battCard) battCard.style.borderLeftColor = "#10b981";
         } else if (batteryPercent > 20) {
             battBar.className = "bg-amber-500 h-2 rounded-full transition-all duration-500";
-            if(battCard) battCard.style.borderLeftColor = "#f59e0b"; // สีส้ม
+            if(battCard) battCard.style.borderLeftColor = "#f59e0b";
         } else {
             battBar.className = "bg-rose-500 h-2 rounded-full transition-all duration-500 animate-pulse";
-            if(battCard) battCard.style.borderLeftColor = "#f43f5e"; // สีแดงกระพริบ (แบตวิกฤต)
+            if(battCard) battCard.style.borderLeftColor = "#f43f5e";
         }
     }
 }
@@ -293,7 +293,7 @@ function centerToDevice() {
     }
 }
 
-// ตรวจสอบ Geofence พร้อมระบบส่ง Telegram อัตโนมัติ
+// ตรวจสอบ Geofence พร้อมระบบส่ง Telegram อัตโนมัติ (แก้ไขลิงก์ Google Maps)
 function checkGeofence(coords) {
     const distance = map.distance([coords.lat, coords.lon], [homeLat, homeLon]);
     document.getElementById('distance-text').innerText = `ระยะห่างจากบ้าน: ${distance.toFixed(1)} เมตร`;
@@ -314,6 +314,7 @@ function checkGeofence(coords) {
         statusEl.innerHTML = '<span class="text-amber-500 font-extrabold flex items-center gap-1">🚗 ออกนอกบ้าน (Out of Zone)</span>';
         
         if (lastZoneState === 'IN' || lastZoneState === null) {
+            // Fix: ลิงก์ Google Maps ที่ถูกต้อง
             const mapsLink = `https://www.google.com/maps?q=${coords.lat},${coords.lon}`;
             const msg = `🚨 *แจ้งเตือนฉุกเฉิน!*\n🚗 อุปกรณ์ออกนอกพื้นที่บ้านแล้ว!\n📏 ระยะห่าง: ${distance.toFixed(1)} เมตร\n📍 พิกัด: ${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)}\n🔗 [คลิกเปิดดูบน Google Maps](${mapsLink})`;
             sendTelegramAlert(msg);
@@ -325,6 +326,18 @@ function checkGeofence(coords) {
 
 function parseGPS(gpsString) {
     if (!gpsString || gpsString === "No Fix" || gpsString.includes("No Fix")) return null;
+
+    // เพิ่มการรองรับ Google Geolocation API (WiFi / Cell)
+    if (gpsString.startsWith("GoogleAPI:")) {
+        let cleanStr = gpsString.replace("GoogleAPI:", "").trim();
+        const parts = cleanStr.split(',');
+        if (parts.length >= 2) {
+            let lat = parseFloat(parts[0]);
+            let lon = parseFloat(parts[1]);
+            if (!isNaN(lat) && !isNaN(lon)) return { lat, lon, type: 'GoogleAPI' };
+        }
+        return null;
+    }
 
     if (gpsString.startsWith("LBS:")) {
         let lbsClean = gpsString.replace("LBS:", "").trim();
@@ -369,21 +382,30 @@ function parseGPS(gpsString) {
 }
 
 function createDeviceIcon(type) {
-    const isGps = (type === 'GPS');
+    let bgColor = '#f59e0b'; // สีส้มสำหรับ LBS (ค่าเริ่มต้น)
+    let icon = '📡';
+
+    if (type === 'GPS') {
+        bgColor = '#10b981'; // สีเขียวสำหรับ GPS
+        icon = '🛰️';
+    } else if (type === 'GoogleAPI') {
+        bgColor = '#3b82f6'; // สีฟ้าสำหรับ Google API (WiFi)
+        icon = '📍';
+    }
+
     return L.divIcon({
         className: 'custom-device-icon',
-        html: `<div style="background-color: ${isGps ? '#10b981' : '#f59e0b'}; width: 36px; height: 36px; border-radius: 50%; border: 3px solid #ffffff; display: flex; align-items: center; justify-content: center; color: white; font-size: 16px; box-shadow: 0 6px 15px rgba(0,0,0,0.4);">${isGps ? '🛰️' : '📡'}</div>`,
+        html: `<div style="background-color: ${bgColor}; width: 36px; height: 36px; border-radius: 50%; border: 3px solid #ffffff; display: flex; align-items: center; justify-content: center; color: white; font-size: 16px; box-shadow: 0 6px 15px rgba(0,0,0,0.4);">${icon}</div>`,
         iconSize: [36, 36],
         iconAnchor: [18, 18]
     });
 }
 
 // ==============================================================
-// 🌟 ปรับปรุงการดึงข้อมูล Real-time (ดึงแค่ 1 ตัวล่าสุดเท่านั้น)
+// 🌟 ดึงข้อมูล Real-time (รายการล่าสุด)
 // ==============================================================
 async function fetchFirebaseData() {
     try {
-        // ใช้ Query ดึงเฉพาะรายการล่าสุด 1 รายการ เพื่อประหยัดแบนด์วิดท์มหาศาล
         const url = FIREBASE_URL.replace('.json', '.json?orderBy=%22$key%22&limitToLast=1');
         const response = await fetch(url);
         const data = await response.json();
@@ -415,9 +437,15 @@ async function fetchFirebaseData() {
                 if (coords) {
                     lastDeviceCoords = coords;
                     
-                    document.getElementById('lat-lon-text').innerHTML = `Latitude: ${coords.lat.toFixed(6)}, Longitude: ${coords.lon.toFixed(6)} (<span class="${coords.type === 'GPS' ? 'text-emerald-400' : 'text-amber-400 font-bold'}">${coords.type}</span>)`;
+                    // ค้นหาบรรทัดนี้ในฟังก์ชัน fetchFirebaseData()
+                    document.getElementById('lat-lon-text').innerHTML = `Latitude: ${coords.lat.toFixed(6)}, Longitude: ${coords.lon.toFixed(6)} (<span class="${coords.type === 'GPS' ? 'text-emerald-400' : (coords.type === 'GoogleAPI' ? 'text-blue-400 font-bold' : 'text-amber-400 font-bold')}">${coords.type}</span>)`;
 
-                    let popupText = coords.type === 'GPS' ? "<b>🛰️ ตำแหน่งดาวเทียม GPS</b>" : "<b>📡 ตำแหน่งเสามือถือ LBS (ความแม่นยำต่ำ)</b>";
+                    let popupText = "<b>📡 ตำแหน่งเสามือถือ LBS (ความแม่นยำต่ำ)</b>";
+                    if (coords.type === 'GPS') {
+                        popupText = "<b>🛰️ ตำแหน่งดาวเทียม GPS</b>";
+                    } else if (coords.type === 'GoogleAPI') {
+                        popupText = "<b>📍 ตำแหน่งจากเครือข่าย WiFi (Google API)</b>";
+                    }
                     const currentIcon = createDeviceIcon(coords.type);
 
                     if (deviceMarker) {
@@ -450,7 +478,7 @@ setInterval(fetchFirebaseData, 5000);
 setInterval(fetchHomeConfigFromFirebase, 10000);
 
 // ======================================================================
-// 📊 ประวัติข้อมูลย้อนหลัง + แบตเตอรี่ + Side-by-Side Map
+// 📊 ประวัติข้อมูลย้อนหลัง + Side-by-Side Map
 // ======================================================================
 const PUSH_ID_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
 
@@ -470,6 +498,7 @@ let currentSelectedDateKey = null;
 let historyInlineMap = null;
 let historyInlineMarker = null;
 let activeRowIndex = null;
+let currentFilteredEntries = []; // ตัวแปรเก็บรายการหลังกรองไว้เรียกด้วย Index
 
 async function fetchHistoryData() {
     const listEl = document.getElementById('history-date-list');
@@ -564,17 +593,16 @@ function renderHistoryTableContent() {
     const timeStart = document.getElementById('filter-time-start')?.value || "";
     const timeEnd = document.getElementById('filter-time-end')?.value || "";
 
-    const filteredEntries = entries.filter(e => {
+    currentFilteredEntries = entries.filter(e => {
         if (timeStart && e.time < timeStart) return false;
         if (timeEnd && e.time > timeEnd) return false;
         return true;
     });
 
-    const batts = filteredEntries.map(e => Number(e.battery)).filter(v => !isNaN(v));
-    const latestBatt = batts.length ? batts[batts.length - 1] : (filteredEntries.length ? filteredEntries[filteredEntries.length - 1].battery : '-');
+    const batts = currentFilteredEntries.map(e => Number(e.battery)).filter(v => !isNaN(v));
+    const latestBatt = batts.length ? batts[batts.length - 1] : (currentFilteredEntries.length ? currentFilteredEntries[currentFilteredEntries.length - 1].battery : '-');
 
     let html = `
-    <!-- แถบกรองช่วงเวลา -->
     <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-3 mb-4 flex flex-wrap gap-3 items-center justify-between">
         <div class="flex items-center gap-2 text-xs flex-wrap">
             <span class="text-slate-300 font-semibold">⏰ กรองช่วงเวลา:</span>
@@ -584,10 +612,9 @@ function renderHistoryTableContent() {
             <button onclick="renderHistoryTableContent()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded-lg font-medium transition">กรอง</button>
             <button onclick="clearTimeFilter()" class="bg-slate-700 hover:bg-slate-600 text-slate-300 px-2 py-1 rounded-lg text-xs transition">ล้างค่า</button>
         </div>
-        <div class="text-xs text-slate-400">แสดง: <span class="text-white font-bold">${filteredEntries.length}</span> / ${entries.length} รายการ</div>
+        <div class="text-xs text-slate-400">แสดง: <span class="text-white font-bold">${currentFilteredEntries.length}</span> / ${entries.length} รายการ</div>
     </div>
 
-    <!-- สถิติย่อย -->
     <div class="grid grid-cols-2 gap-3 mb-4">
         <div class="bg-slate-900/40 rounded-xl p-3 text-center border border-slate-800">
             <p class="text-[11px] text-slate-400 uppercase tracking-wide">แบตเตอรี่ล่าสุด</p>
@@ -595,14 +622,12 @@ function renderHistoryTableContent() {
         </div>
         <div class="bg-slate-900/40 rounded-xl p-3 text-center border border-slate-800">
             <p class="text-[11px] text-slate-400 uppercase tracking-wide">รายการหลังกรอง</p>
-            <p class="text-lg font-bold text-white mt-1">${filteredEntries.length}</p>
+            <p class="text-lg font-bold text-white mt-1">${currentFilteredEntries.length}</p>
         </div>
     </div>
 
-    <!-- โครงสร้าง Side-by-Side -->
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         
-        <!-- ซ้าย: ตารางข้อมูล -->
         <div class="lg:col-span-7 bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden flex flex-col">
             <div class="max-h-[360px] overflow-y-auto">
                 <table class="w-full text-xs">
@@ -615,10 +640,10 @@ function renderHistoryTableContent() {
                     </thead>
                     <tbody>`;
 
-    if (filteredEntries.length === 0) {
+    if (currentFilteredEntries.length === 0) {
         html += `<tr><td colspan="3" class="text-center py-8 text-slate-400">ไม่พบข้อมูลในช่วงเวลาที่กำหนด</td></tr>`;
     } else {
-        filteredEntries.forEach((e, idx) => {
+        currentFilteredEntries.forEach((e, idx) => {
             const hasValidCoords = parseGPS(e.gps) !== null;
             const isSelected = activeRowIndex === idx;
             
@@ -627,8 +652,9 @@ function renderHistoryTableContent() {
                 rowStyle += ' bg-indigo-900/60 border-l-4 border-indigo-400';
             }
 
+            // Fix: เรียกใช้ selectHistoryRow(idx) ผ่าน Index ป้องกันปัญหาสตริงหลุด
             html += `
-                <tr class="border-b border-slate-800/60 ${rowStyle}" ${hasValidCoords ? `onclick='selectHistoryRow(${idx}, ${JSON.stringify(JSON.stringify(e))})'` : ''}>
+                <tr class="border-b border-slate-800/60 ${rowStyle}" ${hasValidCoords ? `onclick="selectHistoryRow(${idx})"` : ''}>
                     <td class="py-2.5 px-3 font-mono text-slate-300 whitespace-nowrap">🕒 ${e.time}</td>
                     <td class="py-2.5 px-3 text-emerald-400 font-semibold whitespace-nowrap">🔋 ${e.battery}${e.battery !== '-' ? '%' : ''}</td>
                     <td class="py-2.5 px-3 text-slate-400 truncate max-w-[180px]">${e.gps}</td>
@@ -645,7 +671,6 @@ function renderHistoryTableContent() {
             </div>
         </div>
 
-        <!-- ขวา: แผนที่แสดงตำแหน่งย้อนหลังด้านข้าง -->
         <div class="lg:col-span-5 bg-slate-900/60 border border-slate-800 rounded-2xl p-3 flex flex-col gap-3">
             <div class="flex items-center justify-between">
                 <h4 class="text-xs font-bold text-white flex items-center gap-1.5">🗺️ ตำแหน่งอุปกรณ์บนแผนที่</h4>
@@ -663,10 +688,10 @@ function renderHistoryTableContent() {
 
     contentEl.innerHTML = html;
 
-    if (filteredEntries.length > 0) {
-        const firstValidIdx = filteredEntries.findIndex(e => parseGPS(e.gps) !== null);
+    if (currentFilteredEntries.length > 0) {
+        const firstValidIdx = currentFilteredEntries.findIndex(e => parseGPS(e.gps) !== null);
         if (firstValidIdx !== -1) {
-            selectHistoryRow(firstValidIdx, JSON.stringify(filteredEntries[firstValidIdx]));
+            selectHistoryRow(firstValidIdx);
         }
     }
 }
@@ -679,9 +704,12 @@ function clearTimeFilter() {
     renderHistoryTableContent();
 }
 
-function selectHistoryRow(index, entryJsonStr) {
+// Fix: รับค่าจาก Index ของ Array
+function selectHistoryRow(index) {
     activeRowIndex = index;
-    const entry = typeof entryJsonStr === 'string' ? JSON.parse(entryJsonStr) : entryJsonStr;
+    const entry = currentFilteredEntries[index];
+    if (!entry) return;
+
     const coords = parseGPS(entry.gps);
 
     const rows = document.querySelectorAll('#history-day-content tbody tr');
@@ -698,10 +726,14 @@ function selectHistoryRow(index, entryJsonStr) {
 
     const infoEl = document.getElementById('inline-history-info');
     if (infoEl) {
+        let coordStyle = 'text-amber-300 font-bold'; // LBS
+        if (coords && coords.type === 'GPS') coordStyle = 'text-emerald-300';
+        else if (coords && coords.type === 'GoogleAPI') coordStyle = 'text-blue-300 font-bold';
+
         infoEl.innerHTML = `
             <div>📅 วันที่: <span class="text-white">${currentSelectedDateKey}</span> | ⏰ <span class="text-white">${entry.time}</span></div>
             <div class="mt-1">🔋 แบตเตอรี่: <span class="text-emerald-400 font-bold">${entry.battery}%</span></div>
-            <div class="mt-1 truncate">📍 พิกัด: <span class="${coords && coords.type === 'GPS' ? 'text-emerald-300' : 'text-amber-300 font-bold'}">${coords ? `${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)} (${coords.type})` : 'ไม่มีพิกัด'}</span></div>
+            <div class="mt-1 truncate">📍 พิกัด: <span class="${coordStyle}">${coords ? `${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)} (${coords.type})` : 'ไม่มีพิกัด'}</span></div>
         `;
     }
 
@@ -740,11 +772,17 @@ function openHistoryModal() {
     fetchHistoryData();
 }
 
+// Fix: ลบอินสแตนซ์ของแผนที่ทิ้งเมื่อปิด Modal ป้องกัน Leaflet Error
 function closeHistoryModal() {
     const modal = document.getElementById('history-modal');
     modal.classList.add('hidden');
     modal.classList.remove('flex');
-    historyInlineMap = null;
+    
+    if (historyInlineMap) {
+        historyInlineMap.remove();
+        historyInlineMap = null;
+    }
+    historyInlineMarker = null;
 }
 
 document.getElementById('history-modal').addEventListener('click', function (e) {
