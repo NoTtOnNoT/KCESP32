@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="th" id="html-root" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoBelt - เข้าสู่ระบบ</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+        }
+    </script>
+    <!-- Custom CSS (ใช้ไฟล์เดียวกับหน้าแดชบอร์ด เพื่อให้ธีม/สีตรงกัน) -->
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Firebase SDK (compat) - ใช้เฉพาะ Realtime Database ไม่ใช้ Firebase Authentication -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+    <!-- ระบบจัดการบัญชีผู้ใช้ร่วมกับหน้า signup.html -->
+    <script src="auth.js"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans antialiased min-h-screen flex flex-col justify-center items-center transition-colors duration-300 p-4">
+
+    <!-- ปุ่มสลับธีม มุมขวาบน -->
+    <button onclick="toggleTheme()" id="theme-toggle-btn" class="fixed top-4 right-4 bg-slate-800 hover:bg-slate-700 text-slate-200 p-2.5 rounded-xl transition border border-slate-700 text-sm flex items-center gap-1.5 shadow-sm">
+        <span id="theme-icon">☀️</span> <span id="theme-text" class="text-xs font-semibold">โหมดสว่าง</span>
+    </button>
+
+    <div class="w-full max-w-md">
+        <!-- โลโก้ / หัวเรื่อง -->
+        <div class="flex flex-col items-center mb-6">
+            <div class="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center text-3xl shadow-lg shadow-indigo-500/30 mb-3">🛰️</div>
+            <h1 class="text-2xl font-extrabold tracking-tight theme-text-primary">GeoBelt</h1>
+            <p class="text-slate-400 text-xs md:text-sm mt-1">เข็มขัดติดตามผู้ป่วยอัลไซเมอร์</p>
+        </div>
+
+        <!-- การ์ดฟอร์มล็อกอิน -->
+        <div class="theme-panel border border-slate-700/50 rounded-3xl p-6 md:p-8 shadow-xl">
+            <h2 class="text-base font-bold theme-text-primary mb-1">เข้าสู่ระบบผู้ดูแล</h2>
+            <p class="text-xs text-slate-400 mb-6">กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแล (Caretaker) ของท่าน</p>
+
+            <form id="login-form" class="space-y-4" onsubmit="handleLogin(event)">
+                <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1.5">อีเมล</label>
+                    <input
+                        type="email"
+                        id="input-email"
+                        required
+                        autocomplete="email"
+                        placeholder="you@example.com"
+                        class="w-full theme-input border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                </div>
+
+                <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1.5">รหัสผ่าน</label>
+                    <div class="relative">
+                        <input
+                            type="password"
+                            id="input-password"
+                            required
+                            autocomplete="current-password"
+                            placeholder="••••••••"
+                            class="w-full theme-input border border-slate-700 rounded-xl px-3.5 py-2.5 pr-11 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        >
+                        <button type="button" onclick="togglePasswordVisibility()" id="toggle-pw-btn" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 text-sm">
+                            👁️
+                        </button>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-between text-xs pt-1">
+                    <label class="flex items-center gap-2 text-slate-400 cursor-pointer select-none">
+                        <input type="checkbox" id="input-remember" class="rounded border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0" checked>
+                        จดจำฉันไว้
+                    </label>
+                </div>
+
+                <!-- กล่องแสดงข้อผิดพลาด -->
+                <div id="error-box" class="hidden text-xs text-red-300 bg-red-950/40 border border-red-500/40 rounded-xl px-3.5 py-2.5"></div>
+
+                <button
+                    type="submit"
+                    id="login-btn"
+                    class="w-full bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-4 py-3 rounded-xl transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                    <span id="login-btn-spinner" class="hidden w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span>
+                    <span id="login-btn-text">เข้าสู่ระบบ</span>
+                </button>
+            </form>
+
+            <p class="text-center text-xs text-slate-400 mt-5">
+                ยังไม่มีบัญชี?
+                <a href="signup.html" class="text-indigo-400 hover:text-indigo-300 font-semibold">สร้างบัญชีใหม่</a>
+            </p>
+        </div>
+
+        <p class="text-center text-xs text-slate-500 mt-6">
+            ESP32 + A7672E Advanced Telemetry Platform &copy; 2026
+        </p>
+    </div>
+
+    <script>
+        // หน้าที่จะพาไปหลังล็อกอินสำเร็จ
+        const REDIRECT_URL = "index.html";
+
+        // ถ้าล็อกอินอยู่แล้ว (มี session ค้างอยู่) ให้เด้งไปหน้าแดชบอร์ดทันที
+        if (getSession()) {
+            window.location.href = REDIRECT_URL;
+        }
+
+        // ==============================
+        // จัดการการ Submit ฟอร์ม
+        // ==============================
+        async function handleLogin(e) {
+            e.preventDefault();
+
+            const email = document.getElementById('input-email').value.trim();
+            const password = document.getElementById('input-password').value;
+            const remember = document.getElementById('input-remember').checked;
+
+            setLoading(true);
+            hideError();
+
+            try {
+                const result = await loginUser(email, password);
+
+                if (!result.success) {
+                    setLoading(false);
+                    showError(result.message);
+                    return;
+                }
+
+                saveSession(result.user, remember);
+                window.location.href = REDIRECT_URL;
+            } catch (err) {
+                setLoading(false);
+                showError('เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง');
+                console.error(err);
+            }
+        }
+
+        // ==============================
+        // แสดง/ซ่อนรหัสผ่าน
+        // ==============================
+        function togglePasswordVisibility() {
+            const input = document.getElementById('input-password');
+            const btn = document.getElementById('toggle-pw-btn');
+            if (input.type === 'password') {
+                input.type = 'text';
+                btn.textContent = '🙈';
+            } else {
+                input.type = 'password';
+                btn.textContent = '👁️';
+            }
+        }
+
+        // ==============================
+        // ฟังก์ชันช่วยเหลือ UI
+        // ==============================
+        function setLoading(isLoading) {
+            const btn = document.getElementById('login-btn');
+            const spinner = document.getElementById('login-btn-spinner');
+            const text = document.getElementById('login-btn-text');
+
+            btn.disabled = isLoading;
+            spinner.classList.toggle('hidden', !isLoading);
+            text.textContent = isLoading ? 'กำลังเข้าสู่ระบบ...' : 'เข้าสู่ระบบ';
+        }
+
+        function showError(message) {
+            const box = document.getElementById('error-box');
+            box.textContent = message;
+            box.classList.remove('hidden');
+        }
+
+        function hideError() {
+            const box = document.getElementById('error-box');
+            box.classList.add('hidden');
+        }
+
+        // ==============================
+        // สลับธีม (ให้พฤติกรรมตรงกับหน้าแดชบอร์ด)
+        // ==============================
+        function toggleTheme() {
+            const root = document.getElementById('html-root');
+            const icon = document.getElementById('theme-icon');
+            const text = document.getElementById('theme-text');
+            const isDark = root.classList.toggle('dark');
+
+            icon.textContent = isDark ? '☀️' : '🌙';
+            text.textContent = isDark ? 'โหมดสว่าง' : 'โหมดมืด';
+
+            localStorage.setItem('geobelt-theme', isDark ? 'dark' : 'light');
+        }
+
+        (function initTheme() {
+            const saved = localStorage.getItem('geobelt-theme');
+            const root = document.getElementById('html-root');
+            const icon = document.getElementById('theme-icon');
+            const text = document.getElementById('theme-text');
+
+            if (saved === 'light') {
+                root.classList.remove('dark');
+                icon.textContent = '🌙';
+                text.textContent = 'โหมดมืด';
+            } else {
+                root.classList.add('dark');
+                icon.textContent = '☀️';
+                text.textContent = 'โหมดสว่าง';
+            }
+        })();
+    </script>
+</body>
+</html>
