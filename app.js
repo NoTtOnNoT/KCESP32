@@ -8,6 +8,126 @@ const TELEGRAM_CHAT_ID = "8530891463";
 let lastZoneState = null;                                                   
 // ==============================================================
 
+// ===================== ระบบ PIN ป้องกันการแก้ไขขอบเขตบ้าน =====================
+// เก็บ PIN (แบบ salt + SHA-256 hash เหมือนใน auth.js) ไว้ใน Firebase Realtime
+// Database ที่ node "app_settings/home_edit_pin" เพื่อไม่ให้ฝัง PIN ตรงๆ ในโค้ด
+// และสามารถเปลี่ยน PIN ได้เองจากในแอปโดยไม่ต้องแก้ไฟล์
+//
+// หมายเหตุ: ใช้ตัวแปร `db`, ฟังก์ชัน `hashPassword()` และ `generateSalt()`
+// ร่วมกับ auth.js (โหลดก่อนไฟล์นี้ใน index.html)
+// ================================================================
+const HOME_PIN_PATH = "app_settings/home_edit_pin";
+
+// ตรวจสอบ PIN ก่อนอนุญาตให้แก้ไขขอบเขตบ้าน
+// คืนค่า true ถ้าอนุญาต, false ถ้าไม่อนุญาต/ยกเลิก
+async function verifyHomeEditPin() {
+    try {
+        const snapshot = await db.ref(HOME_PIN_PATH).get();
+
+        // ยังไม่เคยตั้งค่า PIN มาก่อน -> ให้ตั้งค่าใหม่ก่อนใช้งานครั้งแรก
+        if (!snapshot.exists()) {
+            return await setupHomeEditPin();
+        }
+
+        const pinData = snapshot.val();
+        const entered = prompt("🔒 กรุณาใส่รหัส PIN เพื่อแก้ไขขอบเขตบ้าน:");
+        if (entered === null) return false; // ผู้ใช้กดยกเลิก
+
+        const trimmed = entered.trim();
+        if (trimmed === "") {
+            alert("กรุณากรอกรหัส PIN");
+            return false;
+        }
+
+        const enteredHash = await hashPassword(trimmed, pinData.salt);
+        if (enteredHash !== pinData.pinHash) {
+            alert("รหัส PIN ไม่ถูกต้อง");
+            addLog("มีความพยายามแก้ไขขอบเขตบ้านด้วย PIN ที่ไม่ถูกต้อง");
+            return false;
+        }
+
+        return true;
+    } catch (error) {
+        console.error("PIN verify error:", error);
+        alert("เกิดข้อผิดพลาดในการตรวจสอบ PIN กรุณาลองใหม่อีกครั้ง");
+        return false;
+    }
+}
+
+// ตั้งค่า PIN ครั้งแรก (เรียกอัตโนมัติเมื่อยังไม่มี PIN ในระบบ)
+async function setupHomeEditPin() {
+    alert("ยังไม่มีการตั้งค่า PIN สำหรับแก้ไขขอบเขตบ้าน กรุณาตั้งค่า PIN ก่อนใช้งานครั้งแรก");
+
+    const pin1 = prompt("🔑 ตั้งรหัส PIN ใหม่ (ตัวเลขอย่างน้อย 4 หลัก):");
+    if (pin1 === null) return false;
+    const trimmed1 = pin1.trim();
+    if (trimmed1.length < 4) {
+        alert("PIN ต้องมีความยาวอย่างน้อย 4 หลัก");
+        return false;
+    }
+
+    const pin2 = prompt("🔑 กรุณายืนยัน PIN อีกครั้ง:");
+    if (pin2 === null) return false;
+    if (trimmed1 !== pin2.trim()) {
+        alert("PIN ทั้งสองครั้งไม่ตรงกัน กรุณาลองใหม่");
+        return false;
+    }
+
+    try {
+        const salt = generateSalt();
+        const pinHash = await hashPassword(trimmed1, salt);
+        await db.ref(HOME_PIN_PATH).set({
+            salt: salt,
+            pinHash: pinHash,
+            updatedAt: firebase.database.ServerValue.TIMESTAMP
+        });
+        alert("ตั้งค่า PIN สำเร็จแล้ว! ระบบจะดำเนินการต่อให้อัตโนมัติ");
+        addLog("ตั้งค่า PIN สำหรับแก้ไขขอบเขตบ้านเรียบร้อยแล้ว");
+        return true;
+    } catch (error) {
+        console.error("PIN setup error:", error);
+        alert("บันทึก PIN ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง");
+        return false;
+    }
+}
+
+// เปลี่ยน PIN (ต้องยืนยัน PIN เดิมก่อน ถ้ายังไม่เคยตั้งจะเข้าสู่ขั้นตอนตั้งใหม่แทน)
+async function changeHomeEditPin() {
+    const verified = await verifyHomeEditPin();
+    if (!verified) return;
+
+    const pin1 = prompt("🔑 กรอกรหัส PIN ใหม่ (ตัวเลขอย่างน้อย 4 หลัก):");
+    if (pin1 === null) return;
+    const trimmed1 = pin1.trim();
+    if (trimmed1.length < 4) {
+        alert("PIN ต้องมีความยาวอย่างน้อย 4 หลัก");
+        return;
+    }
+
+    const pin2 = prompt("🔑 กรุณายืนยัน PIN ใหม่อีกครั้ง:");
+    if (pin2 === null) return;
+    if (trimmed1 !== pin2.trim()) {
+        alert("PIN ทั้งสองครั้งไม่ตรงกัน กรุณาลองใหม่");
+        return;
+    }
+
+    try {
+        const salt = generateSalt();
+        const pinHash = await hashPassword(trimmed1, salt);
+        await db.ref(HOME_PIN_PATH).set({
+            salt: salt,
+            pinHash: pinHash,
+            updatedAt: firebase.database.ServerValue.TIMESTAMP
+        });
+        alert("เปลี่ยน PIN สำเร็จแล้ว");
+        addLog("เปลี่ยน PIN สำหรับแก้ไขขอบเขตบ้านเรียบร้อยแล้ว");
+    } catch (error) {
+        console.error("PIN change error:", error);
+        alert("เปลี่ยน PIN ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง");
+    }
+}
+// ================================================================
+
 // ตั้งค่าธีมเริ่มต้นจาก localStorage
 const savedTheme = localStorage.getItem('theme') || 'dark';
 if (savedTheme === 'light') {
@@ -201,8 +321,18 @@ async function fetchHomeConfigFromFirebase() {
     }
 }
 
-function toggleMapSelectMode(forceState) {
-    isSettingHomeMode = forceState !== undefined ? forceState : !isSettingHomeMode;
+// ต้องผ่านการตรวจ PIN ก่อนถึงจะเปิดโหมดคลิกเลือกจากแมพได้
+// (การปิดโหมด เช่น หลังเลือกพิกัดเสร็จ หรือกดปิดเอง ไม่ต้องใส่ PIN ซ้ำ)
+async function toggleMapSelectMode(forceState) {
+    const targetState = forceState !== undefined ? forceState : !isSettingHomeMode;
+
+    // กำลังจะ "เปิด" โหมดแก้ไข (จากปิด -> เปิด) ต้องตรวจ PIN ก่อน
+    if (targetState === true && isSettingHomeMode === false) {
+        const allowed = await verifyHomeEditPin();
+        if (!allowed) return;
+    }
+
+    isSettingHomeMode = targetState;
     const btn = document.getElementById('btn-map-mode');
     const instruction = document.getElementById('mode-instruction');
     const mapEl = document.getElementById('map');
@@ -235,7 +365,11 @@ map.on('click', function(e) {
     toggleMapSelectMode(false);
 });
 
-function saveHomeSettings() {
+// ต้องผ่านการตรวจ PIN ก่อนถึงจะบันทึกรัศมีบ้านได้
+async function saveHomeSettings() {
+    const allowed = await verifyHomeEditPin();
+    if (!allowed) return;
+
     const radiusInput = document.getElementById('input-home-radius');
     homeRadius = parseFloat(radiusInput.value);
 
@@ -251,7 +385,11 @@ function saveHomeSettings() {
     if (lastDeviceCoords) checkGeofence(lastDeviceCoords);
 }
 
-function useCurrentAsHome() {
+// ต้องผ่านการตรวจ PIN ก่อนถึงจะตั้งบ้านจากตำแหน่งปัจจุบันได้
+async function useCurrentAsHome() {
+    const allowed = await verifyHomeEditPin();
+    if (!allowed) return;
+
     if (!navigator.geolocation) {
         alert("เบราว์เซอร์ของคุณไม่รองรับการระบุตำแหน่งปัจจุบัน");
         return;

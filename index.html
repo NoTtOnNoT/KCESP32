@@ -119,8 +119,14 @@
             <!-- แผงตั้งค่า Geofence และประวัติกิจกรรม -->
             <div class="flex flex-col gap-6">
                 <div class="theme-card border border-slate-700/60 rounded-3xl p-6 shadow-xl">
-                    <h2 class="text-sm font-bold theme-text-primary mb-3">⚙️ ตั้งค่าขอบเขตบ้าน</h2>
-                    
+                    <h2 class="text-sm font-bold theme-text-primary mb-3 flex items-center justify-between">
+                        <span>⚙️ ตั้งค่าขอบเขตบ้าน</span>
+                        <button onclick="changeHomeEditPin()" class="text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 px-2.5 py-1.5 rounded-lg transition font-medium flex items-center gap-1 border border-slate-600">
+                            🔑 เปลี่ยน PIN
+                        </button>
+                    </h2>
+                    <p class="text-[11px] text-slate-400 -mt-1 mb-3">🔒 การแก้ไขขอบเขตบ้านทุกครั้งต้องใส่รหัส PIN เพื่อความปลอดภัย</p>
+
                     <div class="space-y-3">
                         <div class="grid grid-cols-2 gap-2">
                             <button onclick="useCurrentAsHome()" class="bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-2.5 rounded-xl transition font-medium shadow-lg shadow-purple-600/20 flex items-center justify-center gap-1">
