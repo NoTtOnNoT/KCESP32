@@ -100,6 +100,7 @@ function exactBoardRecord(raw, key='', dateKey='') {
         dateKey: raw.history_date || dateKey || '',
         raw,
         deviceId: String(raw.device_id || ''),
+        firmwareVersion: String(raw.firmware_version || ''),
         sos: raw.sos === true,
         uptimeMs: Number(raw.uptime_ms) || 0,
         timestampMs,
@@ -619,6 +620,7 @@ function updateLiveUI(rec) {
         if (rec.stale) warnings.push('พิกัดนี้เป็น Last Known ไม่ใช่ Fix ปัจจุบัน');
         if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) warnings.push(`ไม่ได้รับข้อมูลใหม่ประมาณ ${ageSec} วินาที`);
         if (rec.source === 'LBS') warnings.push('พิกัด LBS มีความแม่นยำต่ำ ใช้เป็นตัวเลือกสุดท้าย');
+        if (!rec.timestampMs || rec.dateKey === 'unknown-date') warnings.push('อุปกรณ์ยังไม่ได้เวลาจริงจาก NTP/เครือข่าย');
         warning.innerText = warnings.join(' • ');
         warning.classList.toggle('hidden', warnings.length === 0);
     }
@@ -715,6 +717,7 @@ function updateRawTelemetryPanel(rec) {
     if (summary) {
         summary.innerHTML = [
             `Device: <b>${escapeHtml(rec.deviceId || currentDeviceId || '-')}</b>`,
+            `Firmware: <b>${escapeHtml(rec.firmwareVersion || '-')}</b>`,
             `History date: <b>${escapeHtml(rec.dateKey || '-')}</b>`,
             `Uptime: <b>${formatDuration(rec.uptimeMs)}</b>`,
             `SOS: <b class="${rec.sos ? 'text-rose-400' : 'text-emerald-400'}">${rec.sos ? 'TRUE' : 'false'}</b>`,
