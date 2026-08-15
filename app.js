@@ -1,11 +1,11 @@
 // ============================================================
-// GeoBelt Dashboard v2.3
+// GeoBelt Dashboard v2.4
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
 // - Invalid/missing ESP32 clock falls back to Firebase push receive time for display.
 // - Live view compares dated + unknown-date nodes so a clockless device is not hidden by old history.
-// - NO Telegram bot token is stored in this browser code.
+// - Telegram alerts are queued to Firebase /alerts; bot token stays server-side in Cloud Functions.
 // ============================================================
 
 const FIREBASE_DB_BASE = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatabase.app";
@@ -21,6 +21,8 @@ const FUTURE_TIME_TOLERANCE_MS = 5 * 60 * 1000;
 const MIN_VALID_TELEMETRY_MS = Date.UTC(2024, 0, 1);
 const LIVE_DATE_CANDIDATE_LIMIT = 4;
 const LEGACY_PAGE_SIZE = 1000;
+const LOW_BATTERY_ALERT_PERCENT = 20;
+const TELEGRAM_ALERTS_ENABLED = true;
 
 const GOOGLE_SUBDOMAINS = ['mt0', 'mt1', 'mt2', 'mt3'];
 const GOOGLE_ATTRIBUTION = '© Google Maps';
@@ -90,6 +92,8 @@ let historyInlineMap = null;
 let historyInlineMarker = null;
 let historyRouteLine = null;
 let lastSosNotifiedIdentity = '';
+let lastConnectivityState = null;
+let lastLowBatteryState = false;
 
 
 // ---------------- Time normalization ----------------
@@ -113,13 +117,13 @@ function nullableNumber(value) {
     return Number.isFinite(n) ? n : null;
 }
 
-function isPlausibleTelemetryTime(ms, now=Date.now()) {
+function isPlausibleTelemetryTime(ms, now = Date.now()) {
     return Number.isFinite(ms) &&
         ms >= MIN_VALID_TELEMETRY_MS &&
         ms <= now + FUTURE_TIME_TOLERANCE_MS;
 }
 
-function resolveRecordTime(raw, key='') {
+function resolveRecordTime(raw, key = '') {
     const t = raw?.time && typeof raw.time === 'object' ? raw.time : {};
     const reportedValid = t.valid;
 
@@ -172,7 +176,7 @@ function recordOrderTimeMs(rec) {
 // battery.{modem_percent},
 // location.{valid,source,stale,lat,lng,accuracy_m,age_ms,satellites},
 // nearby_wifi:[{bssid,rssi}]
-function exactBoardRecord(raw, key='', dateKey='') {
+function exactBoardRecord(raw, key = '', dateKey = '') {
     if (!raw || typeof raw !== 'object') return null;
 
     const loc = raw.location && typeof raw.location === 'object' ? raw.location : {};
@@ -267,22 +271,22 @@ let homeCircle = null;
 const homeIcon = L.divIcon({
     className: 'custom-home-icon',
     html: '<div style="background:#8b5cf6;width:34px;height:34px;border-radius:50%;border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 6px 15px rgba(139,92,246,.5)">🏠</div>',
-    iconSize: [34,34], iconAnchor:[17,17]
+    iconSize: [34, 34], iconAnchor: [17, 17]
 });
 
-function createDeviceIcon(source, stale=false) {
+function createDeviceIcon(source, stale = false) {
     let bg = '#64748b', icon = '📍';
     const s = String(source || '').toUpperCase();
-    if (s === 'GNSS' || s === 'GPS') { bg='#10b981'; icon='🛰️'; }
-    else if (s.includes('GOOGLE')) { bg='#3b82f6'; icon='📍'; }
-    else if (s === 'LAST_KNOWN') { bg='#f59e0b'; icon='🕘'; }
-    else if (s === 'LBS') { bg='#f97316'; icon='📡'; }
-    if (stale) bg='#f59e0b';
+    if (s === 'GNSS' || s === 'GPS') { bg = '#10b981'; icon = '🛰️'; }
+    else if (s.includes('GOOGLE')) { bg = '#3b82f6'; icon = '📍'; }
+    else if (s === 'LAST_KNOWN') { bg = '#f59e0b'; icon = '🕘'; }
+    else if (s === 'LBS') { bg = '#f97316'; icon = '📡'; }
+    if (stale) bg = '#f59e0b';
 
     return L.divIcon({
-        className:'custom-device-icon',
-        html:`<div style="background:${bg};width:38px;height:38px;border-radius:50%;border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:17px;box-shadow:0 6px 16px rgba(0,0,0,.42)">${icon}</div>`,
-        iconSize:[38,38], iconAnchor:[19,19]
+        className: 'custom-device-icon',
+        html: `<div style="background:${bg};width:38px;height:38px;border-radius:50%;border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:17px;box-shadow:0 6px 16px rgba(0,0,0,.42)">${icon}</div>`,
+        iconSize: [38, 38], iconAnchor: [19, 19]
     });
 }
 
@@ -311,22 +315,78 @@ function browserNotify(title, body) {
     }
 }
 
-async function createAlertEvent(type, payload={}) {
+async function createAlertEvent(type, payload = {}) {
     if (!currentDeviceId) return;
+
+    const alertData = {
+        type,
+        deviceId: currentDeviceId,
+        ...payload,
+        created_at: Date.now()
+    };
+
+    // เก็บประวัติลง Firebase
     try {
-        await fetchFirebaseJson(`${FIREBASE_DB_BASE}/alerts/${encodeURIComponent(currentDeviceId)}.json`, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({
-                type,
-                ...payload,
-                created_at: Date.now()
-            })
-        });
-    } catch(e) {
+        await fetchFirebaseJson(
+            `${FIREBASE_DB_BASE}/alerts/${encodeURIComponent(currentDeviceId)}.json`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(alertData)
+            }
+        );
+    } catch (e) {
         console.warn('Alert event write failed', e);
     }
+
+    // ส่ง Telegram ผ่าน Vercel backend
+    try {
+        const response = await fetch('/api/telegram', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(alertData)
+        });
+
+        const result = await response.json();
+
+        if (!response.ok || !result.ok) {
+            throw new Error(result.error || 'Telegram failed');
+        }
+
+        addLog(`Telegram ส่งสำเร็จ: ${type}`);
+
+    } catch (e) {
+        console.error('Telegram:', e);
+        addLog(`Telegram ส่งไม่สำเร็จ: ${type}`);
+    }
 }
+
+async function testTelegramAlert() {
+    const payload = {
+        message: 'ทดสอบการแจ้งเตือนจาก GeoBelt Dashboard',
+        timestamp_ms: Date.now()
+    };
+
+    if (lastDeviceCoords) {
+        payload.lat = lastDeviceCoords.lat;
+        payload.lng = lastDeviceCoords.lon;
+        payload.location_source = lastDeviceCoords.source || 'UNKNOWN';
+    }
+
+    const id = await createAlertEvent('TEST', payload);
+    if (id) {
+        addLog('ส่งเหตุการณ์ทดสอบ Telegram แล้ว');
+        alert('ส่งเหตุการณ์ทดสอบแล้ว หาก Cloud Function ตั้งค่าถูกต้อง Telegram จะได้รับข้อความ');
+    } else {
+        alert('ส่งเหตุการณ์ทดสอบไม่สำเร็จ');
+    }
+}
+
+window.testTelegramAlert = testTelegramAlert;
 
 // ---------------- PIN / home configuration ----------------
 async function verifyHomeEditPin() {
@@ -348,7 +408,7 @@ async function verifyHomeEditPin() {
             return false;
         }
         return true;
-    } catch(e) {
+    } catch (e) {
         console.error(e);
         alert('ตรวจสอบ PIN ไม่สำเร็จ');
         return false;
@@ -394,7 +454,7 @@ async function fetchHomeConfigFromFirebase() {
             homeLon = Number(d.lon);
             homeRadius = Number(d.radius || 100);
         }
-    } catch(e) {
+    } catch (e) {
         console.warn('home config:', e);
     }
     updateHomeOnMap();
@@ -402,22 +462,22 @@ async function fetchHomeConfigFromFirebase() {
 
 async function saveHomeConfigToFirebase() {
     await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HOME_CONFIG_PATH}.json`, {
-        method:'PUT',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({lat:homeLat, lon:homeLon, radius:homeRadius})
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat: homeLat, lon: homeLon, radius: homeRadius })
     });
 }
 
 function updateHomeOnMap() {
     if (!homeMarker) {
-        homeMarker = L.marker([homeLat,homeLon], {icon:homeIcon}).addTo(map).bindPopup('<b>🏠 บ้าน</b>');
-        homeCircle = L.circle([homeLat,homeLon], {
-            radius:homeRadius, color:'#8b5cf6', fillColor:'#a78bfa',
-            fillOpacity:.15, weight:2
+        homeMarker = L.marker([homeLat, homeLon], { icon: homeIcon }).addTo(map).bindPopup('<b>🏠 บ้าน</b>');
+        homeCircle = L.circle([homeLat, homeLon], {
+            radius: homeRadius, color: '#8b5cf6', fillColor: '#a78bfa',
+            fillOpacity: .15, weight: 2
         }).addTo(map);
     } else {
-        homeMarker.setLatLng([homeLat,homeLon]);
-        homeCircle.setLatLng([homeLat,homeLon]).setRadius(homeRadius);
+        homeMarker.setLatLng([homeLat, homeLon]);
+        homeCircle.setLatLng([homeLat, homeLon]).setRadius(homeRadius);
     }
     const input = document.getElementById('input-home-radius');
     if (input) input.value = homeRadius;
@@ -464,15 +524,15 @@ async function useCurrentAsHome() {
         homeLon = pos.coords.longitude;
         updateHomeOnMap();
         await saveHomeConfigToFirebase();
-        map.setView([homeLat,homeLon], 18);
+        map.setView([homeLat, homeLon], 18);
     }, () => alert('ไม่สามารถอ่านตำแหน่งปัจจุบันได้'), {
-        enableHighAccuracy:true, timeout:12000, maximumAge:0
+        enableHighAccuracy: true, timeout: 12000, maximumAge: 0
     });
 }
 
 // ---------------- Record normalization ----------------
 // รองรับทั้ง schema ใหม่และข้อมูลเก่า
-function normalizeRecord(raw, key='', dateKey='') {
+function normalizeRecord(raw, key = '', dateKey = '') {
     // Prefer the exact schema sent by GeoBeltTracker.ino.
     if (isNewBoardSchema(raw)) return exactBoardRecord(raw, key, dateKey);
 
@@ -505,7 +565,7 @@ function normalizeRecord(raw, key='', dateKey='') {
         firmwareVersion: String(raw.firmware_version || ''),
         uptimeMs: Number(raw.uptime_ms) || 0,
         battery: Number.isFinite(Number(battery)) ? Number(battery) : null,
-        lat, lon, source, accuracy:null, valid, stale:false,
+        lat, lon, source, accuracy: null, valid, stale: false,
         timestampMs: receivedAtMs,
         deviceTimestampMs: 0,
         receivedAtMs,
@@ -513,10 +573,10 @@ function normalizeRecord(raw, key='', dateKey='') {
         timestampFallback: !!receivedAtMs,
         timestampSource: receivedAtMs ? 'FIREBASE_PUSH' : 'NONE',
         reportedTimeSource: 'LEGACY',
-        sos:!!raw.sos,
-        wifiConnected:false, wifiSsid:'', wifiRssi:null,
-        cellularReady:false,
-        locationAgeMs:null, satellites:null, nearbyWifi:[]
+        sos: !!raw.sos,
+        wifiConnected: false, wifiSsid: '', wifiRssi: null,
+        cellularReady: false,
+        locationAgeMs: null, satellites: null, nearbyWifi: []
     };
 }
 
@@ -526,36 +586,36 @@ function parseLegacyGPS(gps) {
 
     if (s.startsWith('GoogleAPI:')) {
         const p = s.slice(10).split(',');
-        const lat=Number(p[0]), lon=Number(p[1]);
-        return Number.isFinite(lat)&&Number.isFinite(lon) ? {lat,lon,source:'GOOGLE'} : null;
+        const lat = Number(p[0]), lon = Number(p[1]);
+        return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon, source: 'GOOGLE' } : null;
     }
 
     if (s.startsWith('LBS:')) {
         const p = s.slice(4).split(',');
-        const lat=Number(p[1]), lon=Number(p[2]);
-        return Number.isFinite(lat)&&Number.isFinite(lon) ? {lat,lon,source:'LBS'} : null;
+        const lat = Number(p[1]), lon = Number(p[2]);
+        return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon, source: 'LBS' } : null;
     }
 
-    s = s.replace('GPS:','').replace('+CGNSSINFO:','').trim();
+    s = s.replace('GPS:', '').replace('+CGNSSINFO:', '').trim();
     const p = s.split(',');
-    for (let i=0;i<p.length;i++) {
+    for (let i = 0; i < p.length; i++) {
         if (p[i] === 'N' || p[i] === 'S') {
-            const latRaw = Number(p[i-1]);
-            const ewIndex = p.findIndex((x,idx)=>idx>i && (x==='E'||x==='W'));
+            const latRaw = Number(p[i - 1]);
+            const ewIndex = p.findIndex((x, idx) => idx > i && (x === 'E' || x === 'W'));
             if (ewIndex > 0) {
-                const lonRaw = Number(p[ewIndex-1]);
+                const lonRaw = Number(p[ewIndex - 1]);
                 let lat = nmeaToDecimal(latRaw, false);
                 let lon = nmeaToDecimal(lonRaw, true);
                 if (p[i] === 'S') lat = -lat;
                 if (p[ewIndex] === 'W') lon = -lon;
-                if (Number.isFinite(lat)&&Number.isFinite(lon)) return {lat,lon,source:'GNSS'};
+                if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon, source: 'GNSS' };
             }
         }
     }
     return null;
 }
 
-function nmeaToDecimal(value, longitude=false) {
+function nmeaToDecimal(value, longitude = false) {
     if (!Number.isFinite(value)) return NaN;
     const degDigits = longitude ? 3 : 2;
     const str = String(Math.abs(value));
@@ -563,8 +623,8 @@ function nmeaToDecimal(value, longitude=false) {
     const integerLen = dot >= 0 ? dot : str.length;
     if (integerLen <= degDigits) return value;
     const degrees = Math.floor(value / 100);
-    const minutes = Math.abs(value) - Math.abs(degrees)*100;
-    return degrees + minutes/60;
+    const minutes = Math.abs(value) - Math.abs(degrees) * 100;
+    return degrees + minutes / 60;
 }
 
 // ---------------- Device discovery ----------------
@@ -598,7 +658,7 @@ async function discoverDevices() {
         localStorage.setItem('geobelt_device', currentDeviceId);
 
         await refreshNow();
-    } catch(e) {
+    } catch (e) {
         console.error(e);
         select.innerHTML = '<option value="">เชื่อมต่อ Firebase ไม่สำเร็จ</option>';
         setStatus('เชื่อมต่อ Firebase ไม่สำเร็จ', 'offline');
@@ -613,6 +673,8 @@ async function changeDevice(id) {
     latestRecordTimestampMs = 0;
     lastZoneState = null;
     lastSosNotifiedIdentity = '';
+    lastConnectivityState = null;
+    lastLowBatteryState = false;
     if (deviceMarker) { deviceMarker.remove(); deviceMarker = null; }
     if (accuracyCircle) { accuracyCircle.remove(); accuracyCircle = null; }
 
@@ -621,11 +683,11 @@ async function changeDevice(id) {
 }
 
 // ---------------- Live data ----------------
-function bangkokDateKey(date=new Date()) {
+function bangkokDateKey(date = new Date()) {
     const parts = new Intl.DateTimeFormat('en-CA', {
-        timeZone:'Asia/Bangkok', year:'numeric', month:'2-digit', day:'2-digit'
+        timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit'
     }).formatToParts(date);
-    const obj = Object.fromEntries(parts.map(x=>[x.type,x.value]));
+    const obj = Object.fromEntries(parts.map(x => [x.type, x.value]));
     return `${obj.year}-${obj.month}-${obj.day}`;
 }
 
@@ -646,14 +708,14 @@ async function getDeviceDateKeys() {
         const data = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}.json?shallow=true`);
         if (!data || typeof data !== 'object') return [];
         return Object.keys(data).filter(k => k === 'unknown-date' || /^\d{4}-\d{2}-\d{2}$/.test(k));
-    } catch(e) {
+    } catch (e) {
         console.error('date keys:', e);
         return [];
     }
 }
 
 function sortHistoryDateKeys(keys) {
-    return keys.slice().sort((a,b) => {
+    return keys.slice().sort((a, b) => {
         if (a === 'unknown-date') return 1;
         if (b === 'unknown-date') return -1;
         return b.localeCompare(a);
@@ -682,7 +744,7 @@ async function fetchLatestRecord() {
         try {
             const rec = await fetchLastRecordForDate(dateKey);
             if (rec) candidates.push(rec);
-        } catch(e) {
+        } catch (e) {
             console.error(`latest record (${dateKey}):`, e);
         }
     }
@@ -692,7 +754,7 @@ async function fetchLatestRecord() {
         return;
     }
 
-    candidates.sort((a,b) => recordOrderTimeMs(b) - recordOrderTimeMs(a));
+    candidates.sort((a, b) => recordOrderTimeMs(b) - recordOrderTimeMs(a));
     const rec = candidates[0];
 
     latestRecord = rec;
@@ -716,7 +778,7 @@ async function fetchLegacyLatest() {
         latestRecord = rec;
         latestRecordTimestampMs = rec.timestampMs || rec.receivedAtMs || 0;
         updateLiveUI(rec);
-    } catch(e) {
+    } catch (e) {
         console.error(e);
         setStatus('โหลดข้อมูลเดิมไม่สำเร็จ', 'offline');
     }
@@ -728,7 +790,7 @@ function updateLiveUI(rec) {
     const futureOffsetMs = displayTimestampMs ? displayTimestampMs - now : 0;
     const hasBadFutureTime = displayTimestampMs && futureOffsetMs > FUTURE_TIME_TOLERANCE_MS;
     const ageSec = displayTimestampMs && !hasBadFutureTime
-        ? Math.max(0, Math.floor((now-displayTimestampMs)/1000))
+        ? Math.max(0, Math.floor((now - displayTimestampMs) / 1000))
         : null;
 
     if (hasBadFutureTime) setStatus('เวลาอุปกรณ์ผิดปกติ', 'stale');
@@ -738,10 +800,52 @@ function updateLiveUI(rec) {
     else if (!displayTimestampMs) setStatus('ออนไลน์ • ยังไม่มีเวลาจริง', 'stale');
     else setStatus('ออนไลน์', 'live');
 
+    // Telegram alert state transitions. These only fire when the state changes,
+    // preventing the 5-second live refresh from spamming duplicate alerts.
+    const connectivityState =
+        ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS ? 'OFFLINE' : 'ONLINE';
+
+    if (lastConnectivityState && connectivityState !== lastConnectivityState) {
+        if (connectivityState === 'OFFLINE') {
+            createAlertEvent('DEVICE_OFFLINE', {
+                last_seen_ms: displayTimestampMs || null,
+                age_seconds: ageSec,
+                lat: rec.valid ? rec.lat : null,
+                lng: rec.valid ? rec.lon : null,
+                location_source: rec.source || 'NONE'
+            });
+            addLog('📴 อุปกรณ์ออฟไลน์ • ส่งเข้าคิว Telegram');
+        } else {
+            createAlertEvent('DEVICE_ONLINE', {
+                timestamp_ms: displayTimestampMs || Date.now(),
+                lat: rec.valid ? rec.lat : null,
+                lng: rec.valid ? rec.lon : null,
+                location_source: rec.source || 'NONE'
+            });
+            addLog('🟢 อุปกรณ์กลับมาออนไลน์ • ส่งเข้าคิว Telegram');
+        }
+    }
+    lastConnectivityState = connectivityState;
+
+    const lowBatteryNow = rec.battery !== null &&
+        Number.isFinite(Number(rec.battery)) &&
+        Number(rec.battery) <= LOW_BATTERY_ALERT_PERCENT;
+
+    if (lowBatteryNow && !lastLowBatteryState) {
+        createAlertEvent('LOW_BATTERY', {
+            battery_percent: Number(rec.battery),
+            timestamp_ms: displayTimestampMs || Date.now(),
+            lat: rec.valid ? rec.lat : null,
+            lng: rec.valid ? rec.lon : null
+        });
+        addLog(`🔋 แบตเตอรี่ต่ำ ${Math.round(Number(rec.battery))}% • ส่งเข้าคิว Telegram`);
+    }
+    lastLowBatteryState = lowBatteryNow;
+
     const warning = document.getElementById('data-warning');
     if (warning) {
         const warnings = [];
-        if (hasBadFutureTime) warnings.push(`เวลาอุปกรณ์เร็วกว่าเวลาจริงประมาณ ${Math.round(futureOffsetMs/60000)} นาที`);
+        if (hasBadFutureTime) warnings.push(`เวลาอุปกรณ์เร็วกว่าเวลาจริงประมาณ ${Math.round(futureOffsetMs / 60000)} นาที`);
         if (rec.timestampFallback) warnings.push('อุปกรณ์ยังไม่มีเวลาจริง • แสดงเวลาที่ Firebase รับข้อมูลแทน');
         else if (!rec.deviceTimeValid || rec.dateKey === 'unknown-date') warnings.push('อุปกรณ์ยังไม่ได้เวลาจริงจาก NTP/GNSS/เครือข่าย');
         if (rec.stale) warnings.push('พิกัดนี้เป็น Last Known ไม่ใช่ Fix ปัจจุบัน');
@@ -770,7 +874,7 @@ function updateLiveUI(rec) {
             ? '--'
             : rec.locationAgeMs < 1000
                 ? `${rec.locationAgeMs} ms`
-                : `${(rec.locationAgeMs/1000).toFixed(1)} s`;
+                : `${(rec.locationAgeMs / 1000).toFixed(1)} s`;
     }
 
     const validityEl = document.getElementById('location-validity');
@@ -787,7 +891,7 @@ function updateLiveUI(rec) {
     if (wifiBestEl) {
         const best = wifiList
             .filter(x => Number.isFinite(Number(x?.rssi)))
-            .sort((a,b)=>Number(b.rssi)-Number(a.rssi))[0];
+            .sort((a, b) => Number(b.rssi) - Number(a.rssi))[0];
         wifiBestEl.innerText = best
             ? `แรงสุด ${best.rssi} dBm • ${String(best.bssid || '').toUpperCase()}`
             : 'ยังไม่มี BSSID';
@@ -795,7 +899,7 @@ function updateLiveUI(rec) {
 
     updateRawTelemetryPanel(rec);
 
-    const displayTime = displayTimestampMs ? new Date(displayTimestampMs).toLocaleString('th-TH', {timeZone:'Asia/Bangkok'}) : '-';
+    const displayTime = displayTimestampMs ? new Date(displayTimestampMs).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' }) : '-';
     const timeSuffix = rec.timestampFallback ? ' (เวลารับข้อมูล)' : '';
     document.getElementById('last-update').innerText = `อัปเดตล่าสุด: ${displayTime}${timeSuffix}`;
     document.getElementById('data-age').innerText = ageSec === null ? 'อายุข้อมูล: -' : `อายุข้อมูล: ${ageSec} วินาที`;
@@ -806,17 +910,17 @@ function updateLiveUI(rec) {
         : (rec.timestampSource || rec.reportedTimeSource || 'NONE');
 
     if (rec.valid) {
-        lastDeviceCoords = {lat:rec.lat, lon:rec.lon, source:rec.source, stale:rec.stale};
+        lastDeviceCoords = { lat: rec.lat, lon: rec.lon, source: rec.source, stale: rec.stale };
         document.getElementById('lat-lon-text').innerText =
             `${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)} • ${sourceFriendly(rec.source)}`;
 
         const icon = createDeviceIcon(rec.source, rec.stale);
-        const popup = `<b>${sourceFriendly(rec.source)}</b><br>${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}${Number.isFinite(rec.accuracy)?`<br>±${Math.round(rec.accuracy)} m`:''}`;
+        const popup = `<b>${sourceFriendly(rec.source)}</b><br>${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}${Number.isFinite(rec.accuracy) ? `<br>±${Math.round(rec.accuracy)} m` : ''}`;
 
         if (!deviceMarker) {
-            deviceMarker = L.marker([rec.lat,rec.lon], {icon}).addTo(map).bindPopup(popup);
+            deviceMarker = L.marker([rec.lat, rec.lon], { icon }).addTo(map).bindPopup(popup);
         } else {
-            deviceMarker.setLatLng([rec.lat,rec.lon]).setIcon(icon).bindPopup(popup);
+            deviceMarker.setLatLng([rec.lat, rec.lon]).setIcon(icon).bindPopup(popup);
         }
 
         if (accuracyCircle) {
@@ -824,24 +928,36 @@ function updateLiveUI(rec) {
             accuracyCircle = null;
         }
         if (Number.isFinite(rec.accuracy) && rec.accuracy > 0 && rec.accuracy <= 5000) {
-            accuracyCircle = L.circle([rec.lat,rec.lon], {
-                radius:rec.accuracy, color:'#60a5fa', fillColor:'#60a5fa',
-                fillOpacity:.07, weight:1
+            accuracyCircle = L.circle([rec.lat, rec.lon], {
+                radius: rec.accuracy, color: '#60a5fa', fillColor: '#60a5fa',
+                fillOpacity: .07, weight: 1
             }).addTo(map);
         }
 
-        if (followMode) map.setView([rec.lat,rec.lon], Math.max(map.getZoom(), 17));
+        if (followMode) map.setView([rec.lat, rec.lon], Math.max(map.getZoom(), 17));
         checkGeofence(lastDeviceCoords);
     } else {
         document.getElementById('lat-lon-text').innerText = 'ยังไม่มีพิกัดที่ใช้งานได้';
     }
 
     if (rec.sos) {
-        const sosIdentity = `${rec.deviceId || currentDeviceId}|${rec.dateKey}|${rec.key || rec.timestampMs}`;
+        const sosIdentity =
+            `${rec.deviceId || currentDeviceId}|${rec.dateKey}|${rec.key || rec.timestampMs}`;
+
         if (sosIdentity !== lastSosNotifiedIdentity) {
             lastSosNotifiedIdentity = sosIdentity;
-            browserNotify('GeoBelt: SOS', 'อุปกรณ์ส่งสัญญาณ SOS');
+
+            browserNotify(
+                'GeoBelt: SOS',
+                'อุปกรณ์ส่งสัญญาณ SOS'
+            );
+
             addLog('🚨 ได้รับ SOS จากอุปกรณ์');
+
+            createAlertEvent('SOS', {
+                lat: rec.lat,
+                lng: rec.lon
+            });
         }
     }
 }
@@ -869,21 +985,21 @@ function updateRawTelemetryPanel(rec) {
 function formatDuration(ms) {
     const n = Number(ms);
     if (!Number.isFinite(n) || n < 0) return '-';
-    const sec = Math.floor(n/1000);
-    const d = Math.floor(sec/86400);
-    const h = Math.floor((sec%86400)/3600);
-    const m = Math.floor((sec%3600)/60);
-    const s = sec%60;
-    return `${d ? d+'d ' : ''}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    const sec = Math.floor(n / 1000);
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    return `${d ? d + 'd ' : ''}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 function escapeHtml(v) {
     return String(v ?? '')
-        .replaceAll('&','&amp;')
-        .replaceAll('<','&lt;')
-        .replaceAll('>','&gt;')
-        .replaceAll('"','&quot;')
-        .replaceAll("'",'&#39;');
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
 }
 
 function setStatus(text, state) {
@@ -907,7 +1023,7 @@ function updateBattery(v) {
     const p = Math.max(0, Math.min(100, value));
     el.innerText = Math.round(p);
     bar.style.width = `${p}%`;
-    bar.className = `h-2 rounded-full transition-all duration-500 ${p>50?'bg-emerald-500':p>20?'bg-amber-500':'bg-rose-500'}`;
+    bar.className = `h-2 rounded-full transition-all duration-500 ${p > 50 ? 'bg-emerald-500' : p > 20 ? 'bg-amber-500' : 'bg-rose-500'}`;
 }
 
 function sourceFriendly(s) {
@@ -929,7 +1045,7 @@ function sourceClass(s) {
 }
 
 function checkGeofence(coords) {
-    const distance = map.distance([coords.lat,coords.lon], [homeLat,homeLon]);
+    const distance = map.distance([coords.lat, coords.lon], [homeLat, homeLon]);
     document.getElementById('distance-text').innerText = `ห่างจากบ้าน ${distance.toFixed(1)} เมตร`;
 
     const state = distance <= homeRadius ? 'IN' : 'OUT';
@@ -941,11 +1057,11 @@ function checkGeofence(coords) {
     if (lastZoneState && lastZoneState !== state) {
         if (state === 'OUT') {
             browserNotify('GeoBelt', `อุปกรณ์ออกนอกพื้นที่บ้าน ${distance.toFixed(0)} เมตร`);
-            createAlertEvent('GEOFENCE_OUT', {distance_m:distance, lat:coords.lat, lng:coords.lon});
+            createAlertEvent('GEOFENCE_OUT', { distance_m: distance, lat: coords.lat, lng: coords.lon, location_source: coords.source || 'UNKNOWN', home_radius_m: homeRadius });
             addLog(`🚨 ออกจากขอบเขตบ้าน (${distance.toFixed(1)} ม.)`);
         } else {
             browserNotify('GeoBelt', 'อุปกรณ์กลับเข้าสู่พื้นที่บ้าน');
-            createAlertEvent('GEOFENCE_IN', {distance_m:distance, lat:coords.lat, lng:coords.lon});
+            createAlertEvent('GEOFENCE_IN', { distance_m: distance, lat: coords.lat, lng: coords.lon, location_source: coords.source || 'UNKNOWN', home_radius_m: homeRadius });
             addLog('🏠 กลับเข้าสู่ขอบเขตบ้าน');
         }
     }
@@ -960,7 +1076,7 @@ function toggleFollowMode() {
 
 function centerToDevice() {
     if (!lastDeviceCoords) return alert('ยังไม่มีพิกัด');
-    map.setView([lastDeviceCoords.lat,lastDeviceCoords.lon], 18);
+    map.setView([lastDeviceCoords.lat, lastDeviceCoords.lon], 18);
 }
 
 async function copyCoordinates() {
@@ -996,7 +1112,7 @@ async function fetchHistoryDates() {
         historyDates = data && typeof data === 'object' ? sortHistoryDateKeys(Object.keys(data)) : [];
         renderHistoryDateList();
         if (historyDates.length) await selectHistoryDate(historyDates[0]);
-    } catch(e) {
+    } catch (e) {
         console.error(e);
         list.innerHTML = '<div class="text-xs text-rose-400 text-center py-6">โหลดวันไม่สำเร็จ</div>';
     }
@@ -1013,7 +1129,7 @@ function renderHistoryDateList() {
 
     historyDates.forEach(dateKey => {
         const b = document.createElement('button');
-        b.className = 'history-date-btn' + (currentSelectedDate===dateKey ? ' active':'');
+        b.className = 'history-date-btn' + (currentSelectedDate === dateKey ? ' active' : '');
         b.dataset.date = dateKey;
         b.innerHTML = `📅 ${dateKey === 'unknown-date' ? 'ยังไม่มีเวลาจริง' : formatDateThai(dateKey)}<span class="block text-slate-400 font-normal mt-1">ข้อมูลจากบอร์ด</span>`;
         b.onclick = () => selectHistoryDate(dateKey);
@@ -1023,7 +1139,7 @@ function renderHistoryDateList() {
     Object.keys(legacyGrouped).sort().reverse().forEach(dateKey => {
         const id = `legacy:${dateKey}`;
         const b = document.createElement('button');
-        b.className = 'history-date-btn' + (currentSelectedDate===id ? ' active':'');
+        b.className = 'history-date-btn' + (currentSelectedDate === id ? ' active' : '');
         b.dataset.date = id;
         b.innerHTML = `🗃️ ${formatDateThai(dateKey)}<span class="block text-slate-400 font-normal mt-1">${legacyGrouped[dateKey].length} รายการเดิม</span>`;
         b.onclick = () => selectHistoryDate(id);
@@ -1049,12 +1165,12 @@ async function selectHistoryDate(dateKey) {
         const data = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${encodeURIComponent(dateKey)}.json`);
 
         currentDayEntries = data && typeof data === 'object'
-            ? Object.entries(data).map(([key,val])=>normalizeRecord(val,key,dateKey)).filter(Boolean)
+            ? Object.entries(data).map(([key, val]) => normalizeRecord(val, key, dateKey)).filter(Boolean)
             : [];
 
-        currentDayEntries.sort((a,b)=>(a.timestampMs||0)-(b.timestampMs||0));
+        currentDayEntries.sort((a, b) => (a.timestampMs || 0) - (b.timestampMs || 0));
         renderHistory();
-    } catch(e) {
+    } catch (e) {
         console.error(e);
         currentDayEntries = [];
         renderHistory();
@@ -1068,12 +1184,12 @@ function renderHistory() {
     const sourceFilter = document.getElementById('filter-source')?.value || '';
 
     currentFilteredEntries = currentDayEntries.filter(rec => {
-        const time = recordTimeString(rec).slice(0,5);
+        const time = recordTimeString(rec).slice(0, 5);
         if (t1 && time < t1) return false;
         if (t2 && time > t2) return false;
 
         if (sourceFilter) {
-            const s = String(rec.source||'NONE').toUpperCase();
+            const s = String(rec.source || 'NONE').toUpperCase();
             if (sourceFilter === 'GOOGLE' && !s.includes('GOOGLE')) return false;
             else if (sourceFilter !== 'GOOGLE' && s !== sourceFilter) return false;
         }
@@ -1089,19 +1205,19 @@ function renderHistory() {
         return;
     }
 
-    body.innerHTML = currentFilteredEntries.map((rec,idx)=>{
+    body.innerHTML = currentFilteredEntries.map((rec, idx) => {
         const coordText = rec.valid ? `${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}` : 'No Fix';
         const batt = Number.isFinite(Number(rec.battery)) ? `${Math.round(Number(rec.battery))}%` : '-';
-        return `<tr class="history-row ${rec.valid?'valid':'invalid'} ${idx===activeHistoryIndex?'selected':''}" ${rec.valid?`onclick="selectHistoryRow(${idx})"`:''}>
+        return `<tr class="history-row ${rec.valid ? 'valid' : 'invalid'} ${idx === activeHistoryIndex ? 'selected' : ''}" ${rec.valid ? `onclick="selectHistoryRow(${idx})"` : ''}>
             <td class="font-mono whitespace-nowrap">🕒 ${recordTimeString(rec)}</td>
             <td class="text-emerald-400 font-bold">${batt}</td>
             <td><span class="source-badge ${sourceClass(rec.source)}">${sourceFriendly(rec.source)}</span></td>
-            <td class="max-w-[210px] truncate">${coordText}${rec.stale?' • เก่า':''}</td>
+            <td class="max-w-[210px] truncate">${coordText}${rec.stale ? ' • เก่า' : ''}</td>
         </tr>`;
     }).join('');
 
     if (activeHistoryIndex < 0) {
-        const first = currentFilteredEntries.findIndex(x=>x.valid);
+        const first = currentFilteredEntries.findIndex(x => x.valid);
         if (first >= 0) selectHistoryRow(first);
     } else {
         updateHistoryRoute();
@@ -1120,40 +1236,40 @@ function selectHistoryRow(index) {
     const rec = currentFilteredEntries[index];
     if (!rec || !rec.valid) return;
 
-    document.querySelectorAll('#history-table-body tr').forEach((r,i)=>r.classList.toggle('selected',i===index));
+    document.querySelectorAll('#history-table-body tr').forEach((r, i) => r.classList.toggle('selected', i === index));
 
     document.getElementById('side-map-time-label').innerText = recordTimeString(rec);
     document.getElementById('inline-history-info').innerHTML = `
-        <div>📅 ${currentSelectedDate?.replace('legacy:','') || '-'}</div>
+        <div>📅 ${currentSelectedDate?.replace('legacy:', '') || '-'}</div>
         <div class="mt-1">🕒 ${recordTimeString(rec)} • ${escapeHtml(rec.timestampSource || 'NONE')}${rec.timestampFallback ? ' (เวลารับข้อมูล)' : ''}</div>
         <div class="mt-1">📍 ${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}</div>
-        <div class="mt-1">${sourceFriendly(rec.source)} ${Number.isFinite(rec.accuracy)?`• ±${Math.round(rec.accuracy)} ม.`:''}</div>
-        <div class="mt-1">🛰️ ดาวเทียม: ${rec.satellites ?? '-'} • อายุ Fix: ${rec.locationAgeMs == null ? '-' : (rec.locationAgeMs/1000).toFixed(1)+' s'}</div>
+        <div class="mt-1">${sourceFriendly(rec.source)} ${Number.isFinite(rec.accuracy) ? `• ±${Math.round(rec.accuracy)} ม.` : ''}</div>
+        <div class="mt-1">🛰️ ดาวเทียม: ${rec.satellites ?? '-'} • อายุ Fix: ${rec.locationAgeMs == null ? '-' : (rec.locationAgeMs / 1000).toFixed(1) + ' s'}</div>
         <div class="mt-1">📶 Wi‑Fi: ${rec.wifiConnected ? escapeHtml(rec.wifiSsid || 'เชื่อมต่อ') : 'ไม่เชื่อม'} • 4G: ${rec.cellularReady ? 'พร้อม' : 'ไม่พร้อม'}</div>
-        <div class="mt-1">🔋 ${Number.isFinite(Number(rec.battery))?Math.round(Number(rec.battery))+'%':'-'}</div>
+        <div class="mt-1">🔋 ${Number.isFinite(Number(rec.battery)) ? Math.round(Number(rec.battery)) + '%' : '-'}</div>
     `;
 
-    setTimeout(()=>{
+    setTimeout(() => {
         if (!historyInlineMap) {
-            historyInlineMap = L.map('inline-history-map', {zoomControl:true});
+            historyInlineMap = L.map('inline-history-map', { zoomControl: true });
             L.tileLayer('https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
-                maxZoom:21, subdomains:GOOGLE_SUBDOMAINS, attribution:GOOGLE_ATTRIBUTION
+                maxZoom: 21, subdomains: GOOGLE_SUBDOMAINS, attribution: GOOGLE_ATTRIBUTION
             }).addTo(historyInlineMap);
         }
         historyInlineMap.invalidateSize();
-        historyInlineMap.setView([rec.lat,rec.lon],18);
+        historyInlineMap.setView([rec.lat, rec.lon], 18);
 
         const icon = createDeviceIcon(rec.source, rec.stale);
-        if (!historyInlineMarker) historyInlineMarker = L.marker([rec.lat,rec.lon],{icon}).addTo(historyInlineMap);
-        else historyInlineMarker.setLatLng([rec.lat,rec.lon]).setIcon(icon);
+        if (!historyInlineMarker) historyInlineMarker = L.marker([rec.lat, rec.lon], { icon }).addTo(historyInlineMap);
+        else historyInlineMarker.setLatLng([rec.lat, rec.lon]).setIcon(icon);
 
         updateHistoryRoute();
-    },80);
+    }, 80);
 }
 
 function toggleHistoryRoute() {
     historyRouteEnabled = !historyRouteEnabled;
-    document.getElementById('route-btn')?.classList.toggle('active',historyRouteEnabled);
+    document.getElementById('route-btn')?.classList.toggle('active', historyRouteEnabled);
     updateHistoryRoute();
 }
 
@@ -1165,10 +1281,10 @@ function updateHistoryRoute() {
     }
     if (!historyRouteEnabled) return;
 
-    const pts = currentFilteredEntries.filter(r=>r.valid && r.source !== 'LBS').map(r=>[r.lat,r.lon]);
+    const pts = currentFilteredEntries.filter(r => r.valid && r.source !== 'LBS').map(r => [r.lat, r.lon]);
     if (pts.length >= 2) {
-        historyRouteLine = L.polyline(pts, {weight:3, opacity:.75}).addTo(historyInlineMap);
-        historyInlineMap.fitBounds(historyRouteLine.getBounds(), {padding:[25,25]});
+        historyRouteLine = L.polyline(pts, { weight: 3, opacity: .75 }).addTo(historyInlineMap);
+        historyInlineMap.fitBounds(historyRouteLine.getBounds(), { padding: [25, 25] });
     }
 }
 
@@ -1182,7 +1298,7 @@ function jumpToPickedDate() {
 
 function exportCurrentDayCSV() {
     if (!currentFilteredEntries.length) return alert('ไม่มีข้อมูลให้ส่งออก');
-    const rows = [['timestamp','time','time_source','device_time_valid','received_at','battery','source','lat','lng','accuracy_m','stale','sos']];
+    const rows = [['timestamp', 'time', 'time_source', 'device_time_valid', 'received_at', 'battery', 'source', 'lat', 'lng', 'accuracy_m', 'stale', 'sos']];
     currentFilteredEntries.forEach(r => rows.push([
         r.timestampMs ? new Date(r.timestampMs).toISOString() : '',
         recordTimeString(r),
@@ -1198,24 +1314,24 @@ function exportCurrentDayCSV() {
         r.sos
     ]));
 
-    const csv = rows.map(row=>row.map(csvEscape).join(',')).join('\n');
-    const blob = new Blob(["\ufeff"+csv], {type:'text/csv;charset=utf-8'});
+    const csv = rows.map(row => row.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `GeoBelt_${currentDeviceId}_${(currentSelectedDate||'history').replace(':','_')}.csv`;
+    a.download = `GeoBelt_${currentDeviceId}_${(currentSelectedDate || 'history').replace(':', '_')}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
 }
 
 function csvEscape(v) {
     const s = String(v ?? '');
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 function formatDateThai(dateKey) {
     const d = new Date(`${dateKey}T12:00:00+07:00`);
     return Number.isNaN(d.getTime()) ? dateKey : d.toLocaleDateString('th-TH', {
-        timeZone:'Asia/Bangkok', day:'2-digit', month:'2-digit', year:'numeric'
+        timeZone: 'Asia/Bangkok', day: '2-digit', month: '2-digit', year: 'numeric'
     });
 }
 
@@ -1223,7 +1339,7 @@ function recordTimeString(rec) {
     const ms = rec.timestampMs || decodePushIdTimestamp(rec.key);
     if (!ms) return '--:--:--';
     return new Date(ms).toLocaleTimeString('th-TH', {
-        timeZone:'Asia/Bangkok', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false
+        timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
     });
 }
 
@@ -1233,10 +1349,10 @@ const PUSH_ID_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrs
 function decodePushIdTimestamp(pushId) {
     if (!pushId || pushId.length < 8) return 0;
     let ms = 0;
-    for (let i=0;i<8;i++) {
+    for (let i = 0; i < 8; i++) {
         const n = PUSH_ID_CHARS.indexOf(pushId[i]);
         if (n < 0) return 0;
-        ms = ms*64+n;
+        ms = ms * 64 + n;
     }
     return ms;
 }
@@ -1253,8 +1369,8 @@ async function loadLegacyPage() {
             return;
         }
 
-        let entries = Object.entries(data).sort(([a],[b])=>a.localeCompare(b));
-        if (legacyOldestKey) entries = entries.filter(([k])=>k !== legacyOldestKey);
+        let entries = Object.entries(data).sort(([a], [b]) => a.localeCompare(b));
+        if (legacyOldestKey) entries = entries.filter(([k]) => k !== legacyOldestKey);
         if (!entries.length) {
             legacyFinished = true;
             return;
@@ -1262,22 +1378,22 @@ async function loadLegacyPage() {
 
         legacyOldestKey = entries[0][0];
 
-        entries.forEach(([key,val])=>{
+        entries.forEach(([key, val]) => {
             const ms = decodePushIdTimestamp(key);
             if (!ms) return;
             const dateKey = bangkokDateKey(new Date(ms));
             if (!legacyGrouped[dateKey]) legacyGrouped[dateKey] = [];
-            const rec = normalizeRecord(val,key,dateKey);
-            if (rec && !legacyGrouped[dateKey].some(x=>x.key===key)) legacyGrouped[dateKey].push(rec);
+            const rec = normalizeRecord(val, key, dateKey);
+            if (rec && !legacyGrouped[dateKey].some(x => x.key === key)) legacyGrouped[dateKey].push(rec);
         });
 
-        Object.values(legacyGrouped).forEach(arr=>arr.sort((a,b)=>a.timestampMs-b.timestampMs));
+        Object.values(legacyGrouped).forEach(arr => arr.sort((a, b) => a.timestampMs - b.timestampMs));
         renderHistoryDateList();
         document.getElementById('legacy-load-more').classList.remove('hidden');
 
         if (entries.length < LEGACY_PAGE_SIZE) legacyFinished = true;
         addLog(`โหลดข้อมูลเดิมเพิ่ม ${entries.length} รายการ`);
-    } catch(e) {
+    } catch (e) {
         console.error(e);
         alert('โหลดข้อมูลเดิมไม่สำเร็จ');
     }
@@ -1304,7 +1420,7 @@ function closeHistoryModal() {
     historyRouteLine = null;
 }
 
-document.getElementById('history-modal')?.addEventListener('click', e=>{
+document.getElementById('history-modal')?.addEventListener('click', e => {
     if (e.target === e.currentTarget) closeHistoryModal();
 });
 
@@ -1316,7 +1432,7 @@ async function init() {
     setInterval(() => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(), LIVE_REFRESH_MS);
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
-    addLog('ระบบ Dashboard v2.3 พร้อมใช้งาน');
+    addLog('ระบบ Dashboard v2.4 พร้อมใช้งาน • Telegram alert queue พร้อม');
 }
 
 init();
