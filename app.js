@@ -1,8 +1,10 @@
 // ============================================================
-// GeoBelt Dashboard v2.1
+// GeoBelt Dashboard v2.2
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
+// - Invalid/missing ESP32 clock falls back to Firebase push receive time for display.
+// - Live view compares dated + unknown-date nodes so a clockless device is not hidden by old history.
 // - NO Telegram bot token is stored in this browser code.
 // ============================================================
 
@@ -16,6 +18,8 @@ const LIVE_REFRESH_MS = 5000;
 const STALE_WARNING_SECONDS = 90;
 const OFFLINE_WARNING_SECONDS = 180;
 const FUTURE_TIME_TOLERANCE_MS = 5 * 60 * 1000;
+const MIN_VALID_TELEMETRY_MS = Date.UTC(2024, 0, 1);
+const LIVE_DATE_CANDIDATE_LIMIT = 4;
 const LEGACY_PAGE_SIZE = 1000;
 
 const GOOGLE_SUBDOMAINS = ['mt0', 'mt1', 'mt2', 'mt3'];
@@ -88,6 +92,71 @@ let historyRouteLine = null;
 let lastSosNotifiedIdentity = '';
 
 
+// ---------------- Time normalization ----------------
+function normalizeEpochMs(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.round(n > 1e12 ? n : n * 1000);
+}
+
+function parseIsoMs(value) {
+    if (!value) return 0;
+    const ms = Date.parse(String(value));
+    return Number.isFinite(ms) ? ms : 0;
+}
+
+function isPlausibleTelemetryTime(ms, now=Date.now()) {
+    return Number.isFinite(ms) &&
+        ms >= MIN_VALID_TELEMETRY_MS &&
+        ms <= now + FUTURE_TIME_TOLERANCE_MS;
+}
+
+function resolveRecordTime(raw, key='') {
+    const t = raw?.time && typeof raw.time === 'object' ? raw.time : {};
+    const reportedValid = t.valid;
+
+    const candidates = [
+        normalizeEpochMs(raw?.timestamp),
+        parseIsoMs(raw?.timestamp_iso),
+        parseIsoMs(raw?.timestamp_bangkok)
+    ].filter(Boolean);
+
+    // If firmware explicitly says time.valid=false, never trust its timestamp.
+    let deviceTimestampMs = 0;
+    if (reportedValid !== false) {
+        deviceTimestampMs = candidates.find(ms => isPlausibleTelemetryTime(ms)) || 0;
+    }
+
+    // Firebase push IDs contain the creation timestamp. This is our display/freshness
+    // fallback when the ESP32 clock is still 1970/2070/unknown.
+    const receivedAtMsRaw = decodePushIdTimestamp(key) || 0;
+    const receivedAtMs = isPlausibleTelemetryTime(receivedAtMsRaw) ? receivedAtMsRaw : 0;
+
+    const deviceTimeValid = !!deviceTimestampMs && reportedValid !== false;
+    const timestampFallback = !deviceTimeValid && !!receivedAtMs;
+    const timestampMs = deviceTimeValid ? deviceTimestampMs : receivedAtMs;
+
+    let timestampSource = 'NONE';
+    if (deviceTimeValid) timestampSource = String(t.source || 'DEVICE').toUpperCase();
+    else if (receivedAtMs) timestampSource = 'FIREBASE_PUSH';
+
+    return {
+        timestampMs,
+        deviceTimestampMs,
+        receivedAtMs,
+        deviceTimeValid,
+        timestampFallback,
+        timestampSource,
+        reportedTimeSource: String(t.source || 'NONE').toUpperCase()
+    };
+}
+
+function recordOrderTimeMs(rec) {
+    // Push time represents when Firebase actually received/created the record and is
+    // therefore the safest value for deciding which record is the newest.
+    return rec?.receivedAtMs || rec?.timestampMs || decodePushIdTimestamp(rec?.key) || 0;
+}
+
 // ---------------- Exact ESP32 telemetry schema ----------------
 // Board sends:
 // device_id, sos, uptime_ms, history_date, timestamp, timestamp_iso,
@@ -106,11 +175,7 @@ function exactBoardRecord(raw, key='', dateKey='') {
     const lon = Number(loc.lng);
     const valid = loc.valid === true && Number.isFinite(lat) && Number.isFinite(lon);
 
-    let timestampMs = 0;
-    const ts = Number(raw.timestamp);
-    if (Number.isFinite(ts) && ts > 0) timestampMs = ts > 1e12 ? ts : ts * 1000;
-    if (!timestampMs && raw.timestamp_iso) timestampMs = Date.parse(raw.timestamp_iso) || 0;
-    if (!timestampMs && key) timestampMs = decodePushIdTimestamp(key) || 0;
+    const timeInfo = resolveRecordTime(raw, key);
 
     return {
         key,
@@ -120,7 +185,13 @@ function exactBoardRecord(raw, key='', dateKey='') {
         firmwareVersion: String(raw.firmware_version || ''),
         sos: raw.sos === true,
         uptimeMs: Number(raw.uptime_ms) || 0,
-        timestampMs,
+        timestampMs: timeInfo.timestampMs,
+        deviceTimestampMs: timeInfo.deviceTimestampMs,
+        receivedAtMs: timeInfo.receivedAtMs,
+        deviceTimeValid: timeInfo.deviceTimeValid,
+        timestampFallback: timeInfo.timestampFallback,
+        timestampSource: timeInfo.timestampSource,
+        reportedTimeSource: timeInfo.reportedTimeSource,
 
         battery: Number.isFinite(Number(bat.modem_percent)) ? Number(bat.modem_percent) : null,
 
@@ -410,13 +481,23 @@ function normalizeRecord(raw, key='', dateKey='') {
         valid = Number.isFinite(lat) && Number.isFinite(lon);
     }
 
-    let timestampMs = key ? decodePushIdTimestamp(key) : 0;
+    const receivedAtMsRaw = key ? decodePushIdTimestamp(key) : 0;
+    const receivedAtMs = isPlausibleTelemetryTime(receivedAtMsRaw) ? receivedAtMsRaw : 0;
     return {
         key, dateKey, raw,
         deviceId: String(raw.device_id || ''),
+        firmwareVersion: String(raw.firmware_version || ''),
+        uptimeMs: Number(raw.uptime_ms) || 0,
         battery: Number.isFinite(Number(battery)) ? Number(battery) : null,
         lat, lon, source, accuracy:null, valid, stale:false,
-        timestampMs, sos:!!raw.sos,
+        timestampMs: receivedAtMs,
+        deviceTimestampMs: 0,
+        receivedAtMs,
+        deviceTimeValid: false,
+        timestampFallback: !!receivedAtMs,
+        timestampSource: receivedAtMs ? 'FIREBASE_PUSH' : 'NONE',
+        reportedTimeSource: 'LEGACY',
+        sos:!!raw.sos,
         wifiConnected:false, wifiSsid:'', wifiRssi:null,
         cellularReady:false,
         locationAgeMs:null, satellites:null, nearbyWifi:[]
@@ -573,31 +654,34 @@ async function fetchLatestRecord() {
         return;
     }
 
-    // Normally newest YYYY-MM-DD is enough. If that node is empty, try the next.
-    // unknown-date is also supported for devices whose wall clock has not been set yet.
-    for (const dateKey of keys.slice(0, 4)) {
+    // Always inspect unknown-date as well as the newest dated nodes. A device whose
+    // clock is not synchronized writes to unknown-date; ignoring it can make the
+    // dashboard show an older record as if it were live.
+    const datedKeys = keys.filter(k => k !== 'unknown-date').slice(0, LIVE_DATE_CANDIDATE_LIMIT);
+    const candidateKeys = [...datedKeys];
+    if (keys.includes('unknown-date')) candidateKeys.push('unknown-date');
+
+    const candidates = [];
+    for (const dateKey of candidateKeys) {
         try {
-            const url = `${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${dateKey}.json?orderBy=%22$key%22&limitToLast=1`;
-            const data = await fetchFirebaseJson(url);
-            if (!data || typeof data !== 'object') continue;
-
-            const entry = Object.entries(data)[0];
-            if (!entry) continue;
-
-            const [key, raw] = entry;
-            const rec = normalizeRecord(raw, key, dateKey);
-            if (!rec) continue;
-
-            latestRecord = rec;
-            latestRecordTimestampMs = rec.timestampMs || Date.now();
-            updateLiveUI(rec);
-            return;
+            const rec = await fetchLastRecordForDate(dateKey);
+            if (rec) candidates.push(rec);
         } catch(e) {
-            console.error('latest record:', e);
+            console.error(`latest record (${dateKey}):`, e);
         }
     }
 
-    setStatus('พบอุปกรณ์แต่ยังไม่มี Telemetry', 'stale');
+    if (!candidates.length) {
+        setStatus('พบอุปกรณ์แต่ยังไม่มี Telemetry', 'stale');
+        return;
+    }
+
+    candidates.sort((a,b) => recordOrderTimeMs(b) - recordOrderTimeMs(a));
+    const rec = candidates[0];
+
+    latestRecord = rec;
+    latestRecordTimestampMs = rec.timestampMs || rec.receivedAtMs || 0;
+    updateLiveUI(rec);
 }
 
 async function fetchLegacyLatest() {
@@ -614,7 +698,7 @@ async function fetchLegacyLatest() {
         if (!rec) return;
 
         latestRecord = rec;
-        latestRecordTimestampMs = rec.timestampMs || Date.now();
+        latestRecordTimestampMs = rec.timestampMs || rec.receivedAtMs || 0;
         updateLiveUI(rec);
     } catch(e) {
         console.error(e);
@@ -624,26 +708,29 @@ async function fetchLegacyLatest() {
 
 function updateLiveUI(rec) {
     const now = Date.now();
-    const futureOffsetMs = rec.timestampMs ? rec.timestampMs - now : 0;
-    const hasBadFutureTime = rec.timestampMs && futureOffsetMs > FUTURE_TIME_TOLERANCE_MS;
-    const ageSec = rec.timestampMs && !hasBadFutureTime
-        ? Math.max(0, Math.floor((now-rec.timestampMs)/1000))
+    const displayTimestampMs = rec.timestampMs || rec.receivedAtMs || 0;
+    const futureOffsetMs = displayTimestampMs ? displayTimestampMs - now : 0;
+    const hasBadFutureTime = displayTimestampMs && futureOffsetMs > FUTURE_TIME_TOLERANCE_MS;
+    const ageSec = displayTimestampMs && !hasBadFutureTime
+        ? Math.max(0, Math.floor((now-displayTimestampMs)/1000))
         : null;
 
     if (hasBadFutureTime) setStatus('เวลาอุปกรณ์ผิดปกติ', 'stale');
     else if (ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS) setStatus('อุปกรณ์ออฟไลน์/ข้อมูลเก่า', 'offline');
     else if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) setStatus('ข้อมูลเริ่มเก่า', 'stale');
-    else if (!rec.timestampMs) setStatus('ออนไลน์ • ยังไม่มีเวลาจริง', 'stale');
+    else if (rec.timestampFallback) setStatus('ออนไลน์ • ใช้เวลารับข้อมูล', 'live');
+    else if (!displayTimestampMs) setStatus('ออนไลน์ • ยังไม่มีเวลาจริง', 'stale');
     else setStatus('ออนไลน์', 'live');
 
     const warning = document.getElementById('data-warning');
     if (warning) {
         const warnings = [];
         if (hasBadFutureTime) warnings.push(`เวลาอุปกรณ์เร็วกว่าเวลาจริงประมาณ ${Math.round(futureOffsetMs/60000)} นาที`);
+        if (rec.timestampFallback) warnings.push('อุปกรณ์ยังไม่มีเวลาจริง • แสดงเวลาที่ Firebase รับข้อมูลแทน');
+        else if (!rec.deviceTimeValid || rec.dateKey === 'unknown-date') warnings.push('อุปกรณ์ยังไม่ได้เวลาจริงจาก NTP/GNSS/เครือข่าย');
         if (rec.stale) warnings.push('พิกัดนี้เป็น Last Known ไม่ใช่ Fix ปัจจุบัน');
         if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) warnings.push(`ไม่ได้รับข้อมูลใหม่ประมาณ ${ageSec} วินาที`);
         if (rec.source === 'LBS') warnings.push('พิกัด LBS มีความแม่นยำต่ำ ใช้เป็นตัวเลือกสุดท้าย');
-        if (!rec.timestampMs || rec.dateKey === 'unknown-date') warnings.push('อุปกรณ์ยังไม่ได้เวลาจริงจาก NTP/เครือข่าย');
         warning.innerText = warnings.join(' • ');
         warning.classList.toggle('hidden', warnings.length === 0);
     }
@@ -692,9 +779,15 @@ function updateLiveUI(rec) {
 
     updateRawTelemetryPanel(rec);
 
-    const displayTime = rec.timestampMs ? new Date(rec.timestampMs).toLocaleString('th-TH', {timeZone:'Asia/Bangkok'}) : '-';
-    document.getElementById('last-update').innerText = `อัปเดตล่าสุด: ${displayTime}`;
+    const displayTime = displayTimestampMs ? new Date(displayTimestampMs).toLocaleString('th-TH', {timeZone:'Asia/Bangkok'}) : '-';
+    const timeSuffix = rec.timestampFallback ? ' (เวลารับข้อมูล)' : '';
+    document.getElementById('last-update').innerText = `อัปเดตล่าสุด: ${displayTime}${timeSuffix}`;
     document.getElementById('data-age').innerText = ageSec === null ? 'อายุข้อมูล: -' : `อายุข้อมูล: ${ageSec} วินาที`;
+
+    const timeSourceEl = document.getElementById('time-source');
+    if (timeSourceEl) timeSourceEl.innerText = rec.timestampFallback
+        ? 'Firebase receive time'
+        : (rec.timestampSource || rec.reportedTimeSource || 'NONE');
 
     if (rec.valid) {
         lastDeviceCoords = {lat:rec.lat, lon:rec.lon, source:rec.source, stale:rec.stale};
@@ -747,6 +840,7 @@ function updateRawTelemetryPanel(rec) {
             `Firmware: <b>${escapeHtml(rec.firmwareVersion || '-')}</b>`,
             `History date: <b>${escapeHtml(rec.dateKey || '-')}</b>`,
             `Uptime: <b>${formatDuration(rec.uptimeMs)}</b>`,
+            `Time: <b>${escapeHtml(rec.timestampSource || 'NONE')}</b>${rec.timestampFallback ? ' <span class="text-amber-400">(Firebase fallback)</span>' : ''}`,
             `SOS: <b class="${rec.sos ? 'text-rose-400' : 'text-emerald-400'}">${rec.sos ? 'TRUE' : 'false'}</b>`,
             `Location source: <b>${escapeHtml(rec.source || 'NONE')}</b>`,
             `Network: <b>${rec.wifiConnected ? 'Wi‑Fi' : (rec.cellularReady ? '4G ready' : 'offline')}</b>`
@@ -1015,6 +1109,7 @@ function selectHistoryRow(index) {
     document.getElementById('side-map-time-label').innerText = recordTimeString(rec);
     document.getElementById('inline-history-info').innerHTML = `
         <div>📅 ${currentSelectedDate?.replace('legacy:','') || '-'}</div>
+        <div class="mt-1">🕒 ${recordTimeString(rec)} • ${escapeHtml(rec.timestampSource || 'NONE')}${rec.timestampFallback ? ' (เวลารับข้อมูล)' : ''}</div>
         <div class="mt-1">📍 ${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}</div>
         <div class="mt-1">${sourceFriendly(rec.source)} ${Number.isFinite(rec.accuracy)?`• ±${Math.round(rec.accuracy)} ม.`:''}</div>
         <div class="mt-1">🛰️ ดาวเทียม: ${rec.satellites ?? '-'} • อายุ Fix: ${rec.locationAgeMs == null ? '-' : (rec.locationAgeMs/1000).toFixed(1)+' s'}</div>
@@ -1071,10 +1166,13 @@ function jumpToPickedDate() {
 
 function exportCurrentDayCSV() {
     if (!currentFilteredEntries.length) return alert('ไม่มีข้อมูลให้ส่งออก');
-    const rows = [['timestamp','time','battery','source','lat','lng','accuracy_m','stale','sos']];
+    const rows = [['timestamp','time','time_source','device_time_valid','received_at','battery','source','lat','lng','accuracy_m','stale','sos']];
     currentFilteredEntries.forEach(r => rows.push([
         r.timestampMs ? new Date(r.timestampMs).toISOString() : '',
         recordTimeString(r),
+        r.timestampSource || '',
+        !!r.deviceTimeValid,
+        r.receivedAtMs ? new Date(r.receivedAtMs).toISOString() : '',
         r.battery ?? '',
         r.source,
         r.valid ? r.lat : '',
@@ -1202,7 +1300,7 @@ async function init() {
     setInterval(() => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(), LIVE_REFRESH_MS);
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
-    addLog('ระบบ Dashboard v2.1 พร้อมใช้งาน');
+    addLog('ระบบ Dashboard v2.2 พร้อมใช้งาน');
 }
 
 init();
