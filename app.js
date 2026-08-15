@@ -1,5 +1,5 @@
 // ============================================================
-// GeoBelt Dashboard v2
+// GeoBelt Dashboard v2.1
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
@@ -15,10 +15,26 @@ const HOME_PIN_PATH = "app_settings/home_edit_pin";
 const LIVE_REFRESH_MS = 5000;
 const STALE_WARNING_SECONDS = 90;
 const OFFLINE_WARNING_SECONDS = 180;
+const FUTURE_TIME_TOLERANCE_MS = 5 * 60 * 1000;
 const LEGACY_PAGE_SIZE = 1000;
 
 const GOOGLE_SUBDOMAINS = ['mt0', 'mt1', 'mt2', 'mt3'];
 const GOOGLE_ATTRIBUTION = '© Google Maps';
+
+async function fetchFirebaseJson(url, options = undefined) {
+    const response = await fetch(url, options);
+    const text = await response.text();
+    let data = null;
+    if (text) {
+        try { data = JSON.parse(text); }
+        catch { data = text; }
+    }
+    if (!response.ok) {
+        const detail = data && typeof data === 'object' && data.error ? data.error : String(data || response.statusText || 'Firebase request failed');
+        throw new Error(`Firebase HTTP ${response.status}: ${detail}`);
+    }
+    return data;
+}
 
 // ---------------- Theme ----------------
 const savedTheme = localStorage.getItem('theme') || 'dark';
@@ -69,6 +85,7 @@ let legacyFinished = false;
 let historyInlineMap = null;
 let historyInlineMarker = null;
 let historyRouteLine = null;
+let lastSosNotifiedIdentity = '';
 
 
 // ---------------- Exact ESP32 telemetry schema ----------------
@@ -210,7 +227,7 @@ function browserNotify(title, body) {
 async function createAlertEvent(type, payload={}) {
     if (!currentDeviceId) return;
     try {
-        await fetch(`${FIREBASE_DB_BASE}/alerts/${encodeURIComponent(currentDeviceId)}.json`, {
+        await fetchFirebaseJson(`${FIREBASE_DB_BASE}/alerts/${encodeURIComponent(currentDeviceId)}.json`, {
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
@@ -284,8 +301,7 @@ async function changeHomeEditPin() {
 
 async function fetchHomeConfigFromFirebase() {
     try {
-        const r = await fetch(`${FIREBASE_DB_BASE}/${HOME_CONFIG_PATH}.json`);
-        const d = await r.json();
+        const d = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HOME_CONFIG_PATH}.json`);
         if (d && Number.isFinite(Number(d.lat)) && Number.isFinite(Number(d.lon))) {
             homeLat = Number(d.lat);
             homeLon = Number(d.lon);
@@ -298,7 +314,7 @@ async function fetchHomeConfigFromFirebase() {
 }
 
 async function saveHomeConfigToFirebase() {
-    await fetch(`${FIREBASE_DB_BASE}/${HOME_CONFIG_PATH}.json`, {
+    await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HOME_CONFIG_PATH}.json`, {
         method:'PUT',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({lat:homeLat, lon:homeLon, radius:homeRadius})
@@ -458,9 +474,8 @@ function nmeaToDecimal(value, longitude=false) {
 async function discoverDevices() {
     const select = document.getElementById('device-select');
     try {
-        const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}.json?shallow=true`);
-        const data = await r.json();
-        const devices = data && typeof data === 'object' ? Object.keys(data) : [];
+        const data = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}.json?shallow=true`);
+        const devices = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data) : [];
 
         select.innerHTML = '';
 
@@ -498,6 +513,11 @@ async function changeDevice(id) {
     localStorage.setItem('geobelt_device', id);
     lastDeviceCoords = null;
     latestRecord = null;
+    latestRecordTimestampMs = 0;
+    lastZoneState = null;
+    lastSosNotifiedIdentity = '';
+    if (deviceMarker) { deviceMarker.remove(); deviceMarker = null; }
+    if (accuracyCircle) { accuracyCircle.remove(); accuracyCircle = null; }
 
     if (id === 'legacy') await fetchLegacyLatest();
     else await refreshNow();
@@ -515,8 +535,7 @@ function bangkokDateKey(date=new Date()) {
 async function fetchLastRecordForDate(dateKey) {
     if (!currentDeviceId) return null;
     const url = `${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${dateKey}.json?orderBy=%22$key%22&limitToLast=1`;
-    const r = await fetch(url);
-    const data = await r.json();
+    const data = await fetchFirebaseJson(url);
     if (!data || typeof data !== 'object') return null;
     const keys = Object.keys(data);
     if (!keys.length) return null;
@@ -527,10 +546,9 @@ async function fetchLastRecordForDate(dateKey) {
 async function getDeviceDateKeys() {
     if (!currentDeviceId || currentDeviceId === 'legacy') return [];
     try {
-        const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}.json?shallow=true`);
-        const data = await r.json();
+        const data = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}.json?shallow=true`);
         if (!data || typeof data !== 'object') return [];
-        return Object.keys(data);
+        return Object.keys(data).filter(k => k === 'unknown-date' || /^\d{4}-\d{2}-\d{2}$/.test(k));
     } catch(e) {
         console.error('date keys:', e);
         return [];
@@ -560,8 +578,7 @@ async function fetchLatestRecord() {
     for (const dateKey of keys.slice(0, 4)) {
         try {
             const url = `${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${dateKey}.json?orderBy=%22$key%22&limitToLast=1`;
-            const r = await fetch(url);
-            const data = await r.json();
+            const data = await fetchFirebaseJson(url);
             if (!data || typeof data !== 'object') continue;
 
             const entry = Object.entries(data)[0];
@@ -586,8 +603,7 @@ async function fetchLatestRecord() {
 async function fetchLegacyLatest() {
     try {
         const url = `${FIREBASE_DB_BASE}/${LEGACY_ROOT}.json?orderBy=%22$key%22&limitToLast=1`;
-        const r = await fetch(url);
-        const data = await r.json();
+        const data = await fetchFirebaseJson(url);
         if (!data || typeof data !== 'object') {
             setStatus('ไม่พบข้อมูลเดิม', 'offline');
             return;
@@ -608,15 +624,22 @@ async function fetchLegacyLatest() {
 
 function updateLiveUI(rec) {
     const now = Date.now();
-    const ageSec = rec.timestampMs ? Math.max(0, Math.floor((now-rec.timestampMs)/1000)) : null;
+    const futureOffsetMs = rec.timestampMs ? rec.timestampMs - now : 0;
+    const hasBadFutureTime = rec.timestampMs && futureOffsetMs > FUTURE_TIME_TOLERANCE_MS;
+    const ageSec = rec.timestampMs && !hasBadFutureTime
+        ? Math.max(0, Math.floor((now-rec.timestampMs)/1000))
+        : null;
 
-    if (ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS) setStatus('อุปกรณ์ออฟไลน์/ข้อมูลเก่า', 'offline');
+    if (hasBadFutureTime) setStatus('เวลาอุปกรณ์ผิดปกติ', 'stale');
+    else if (ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS) setStatus('อุปกรณ์ออฟไลน์/ข้อมูลเก่า', 'offline');
     else if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) setStatus('ข้อมูลเริ่มเก่า', 'stale');
+    else if (!rec.timestampMs) setStatus('ออนไลน์ • ยังไม่มีเวลาจริง', 'stale');
     else setStatus('ออนไลน์', 'live');
 
     const warning = document.getElementById('data-warning');
     if (warning) {
         const warnings = [];
+        if (hasBadFutureTime) warnings.push(`เวลาอุปกรณ์เร็วกว่าเวลาจริงประมาณ ${Math.round(futureOffsetMs/60000)} นาที`);
         if (rec.stale) warnings.push('พิกัดนี้เป็น Last Known ไม่ใช่ Fix ปัจจุบัน');
         if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) warnings.push(`ไม่ได้รับข้อมูลใหม่ประมาณ ${ageSec} วินาที`);
         if (rec.source === 'LBS') warnings.push('พิกัด LBS มีความแม่นยำต่ำ ใช้เป็นตัวเลือกสุดท้าย');
@@ -705,8 +728,12 @@ function updateLiveUI(rec) {
     }
 
     if (rec.sos) {
-        browserNotify('GeoBelt: SOS', 'อุปกรณ์ส่งสัญญาณ SOS');
-        addLog('🚨 ได้รับ SOS จากอุปกรณ์');
+        const sosIdentity = `${rec.deviceId || currentDeviceId}|${rec.dateKey}|${rec.key || rec.timestampMs}`;
+        if (sosIdentity !== lastSosNotifiedIdentity) {
+            lastSosNotifiedIdentity = sosIdentity;
+            browserNotify('GeoBelt: SOS', 'อุปกรณ์ส่งสัญญาณ SOS');
+            addLog('🚨 ได้รับ SOS จากอุปกรณ์');
+        }
     }
 }
 
@@ -826,9 +853,15 @@ function centerToDevice() {
     map.setView([lastDeviceCoords.lat,lastDeviceCoords.lon], 18);
 }
 
-function copyCoordinates() {
+async function copyCoordinates() {
     if (!lastDeviceCoords) return alert('ยังไม่มีพิกัด');
-    navigator.clipboard.writeText(`${lastDeviceCoords.lat}, ${lastDeviceCoords.lon}`);
+    const text = `${lastDeviceCoords.lat}, ${lastDeviceCoords.lon}`;
+    try {
+        await navigator.clipboard.writeText(text);
+        addLog('คัดลอกพิกัดแล้ว');
+    } catch {
+        prompt('คัดลอกพิกัดนี้:', text);
+    }
 }
 
 function openGoogleMaps() {
@@ -849,8 +882,7 @@ async function fetchHistoryDates() {
     list.innerHTML = '<div class="text-xs text-slate-400 text-center py-6">กำลังโหลด...</div>';
 
     try {
-        const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}.json?shallow=true`);
-        const data = await r.json();
+        const data = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}.json?shallow=true`);
         historyDates = data && typeof data === 'object' ? sortHistoryDateKeys(Object.keys(data)) : [];
         renderHistoryDateList();
         if (historyDates.length) await selectHistoryDate(historyDates[0]);
@@ -904,8 +936,7 @@ async function selectHistoryDate(dateKey) {
         '<tr><td colspan="4" class="text-center text-slate-400 py-8">กำลังโหลด...</td></tr>';
 
     try {
-        const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${dateKey}.json`);
-        const data = await r.json();
+        const data = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${encodeURIComponent(dateKey)}.json`);
 
         currentDayEntries = data && typeof data === 'object'
             ? Object.entries(data).map(([key,val])=>normalizeRecord(val,key,dateKey)).filter(Boolean)
@@ -927,7 +958,7 @@ function renderHistory() {
     const sourceFilter = document.getElementById('filter-source')?.value || '';
 
     currentFilteredEntries = currentDayEntries.filter(rec => {
-        const time = recordTimeString(rec);
+        const time = recordTimeString(rec).slice(0,5);
         if (t1 && time < t1) return false;
         if (t2 && time > t2) return false;
 
@@ -1102,8 +1133,7 @@ async function loadLegacyPage() {
     if (legacyOldestKey) query += `&endAt=%22${encodeURIComponent(legacyOldestKey)}%22`;
 
     try {
-        const r = await fetch(`${FIREBASE_DB_BASE}/${LEGACY_ROOT}.json?${query}`);
-        const data = await r.json();
+        const data = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${LEGACY_ROOT}.json?${query}`);
         if (!data || typeof data !== 'object') {
             legacyFinished = true;
             return;
@@ -1172,7 +1202,7 @@ async function init() {
     setInterval(() => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(), LIVE_REFRESH_MS);
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
-    addLog('ระบบ Dashboard v2 พร้อมใช้งาน');
+    addLog('ระบบ Dashboard v2.1 พร้อมใช้งาน');
 }
 
 init();
