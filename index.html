@@ -69,7 +69,7 @@
     </header>
 
     <!-- Overview -->
-    <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4 mb-5">
+    <section class="grid grid-cols-2 lg:grid-cols-6 gap-3 md:gap-4 mb-5">
         <div class="dashboard-card theme-card rounded-2xl p-4 border-l-4 border-emerald-500">
             <p class="metric-label">แบตเตอรี่โมเด็ม</p>
             <div class="flex items-end gap-1 mt-2">
@@ -99,6 +99,21 @@
             <p class="metric-label">ขอบเขตบ้าน</p>
             <p id="home-zone-status" class="font-bold mt-2">กำลังตรวจสอบ...</p>
             <p id="distance-text" class="text-xs text-slate-400 mt-1">--</p>
+        </div>
+
+        <div class="dashboard-card theme-card rounded-2xl p-4 border-l-4 border-indigo-500">
+            <p class="metric-label">GNSS / พิกัด</p>
+            <div class="mt-2 space-y-1 text-xs">
+                <div>🛰️ ดาวเทียม: <span id="satellite-count">--</span></div>
+                <div>⏱️ อายุ Fix: <span id="location-age">--</span></div>
+                <div>📌 สถานะ: <span id="location-validity">--</span></div>
+            </div>
+        </div>
+
+        <div class="dashboard-card theme-card rounded-2xl p-4 border-l-4 border-sky-500">
+            <p class="metric-label">Wi‑Fi รอบตัว</p>
+            <p id="nearby-wifi-count" class="metric-value text-xl mt-2">--</p>
+            <p id="nearby-wifi-best" class="text-xs text-slate-400 mt-1 truncate">ยังไม่มีข้อมูล</p>
         </div>
     </section>
 
@@ -176,6 +191,24 @@
                 </div>
             </div>
         </div>
+    </section>
+
+    <section class="theme-card border theme-border rounded-3xl p-4 md:p-5 shadow-xl mb-5">
+        <details>
+            <summary class="cursor-pointer font-bold theme-text-primary select-none">
+                🧪 ข้อมูล Telemetry ล่าสุดจากบอร์ด
+            </summary>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+                <div>
+                    <p class="text-xs text-slate-400 mb-2">ข้อมูลสรุป</p>
+                    <div id="telemetry-summary" class="history-info font-mono leading-6">รอข้อมูล...</div>
+                </div>
+                <div>
+                    <p class="text-xs text-slate-400 mb-2">JSON ดิบ</p>
+                    <pre id="raw-json" class="history-info font-mono text-[10px] overflow-auto max-h-72 whitespace-pre-wrap">รอข้อมูล...</pre>
+                </div>
+            </div>
+        </details>
     </section>
 </div>
 

@@ -70,6 +70,67 @@ let historyInlineMap = null;
 let historyInlineMarker = null;
 let historyRouteLine = null;
 
+
+// ---------------- Exact ESP32 telemetry schema ----------------
+// Board sends:
+// device_id, sos, uptime_ms, history_date, timestamp, timestamp_iso,
+// network.{wifi_connected,wifi_ssid,wifi_rssi_dbm,cellular_ready},
+// battery.{modem_percent},
+// location.{valid,source,stale,lat,lng,accuracy_m,age_ms,satellites},
+// nearby_wifi:[{bssid,rssi}]
+function exactBoardRecord(raw, key='', dateKey='') {
+    if (!raw || typeof raw !== 'object') return null;
+
+    const loc = raw.location && typeof raw.location === 'object' ? raw.location : {};
+    const net = raw.network && typeof raw.network === 'object' ? raw.network : {};
+    const bat = raw.battery && typeof raw.battery === 'object' ? raw.battery : {};
+
+    const lat = Number(loc.lat);
+    const lon = Number(loc.lng);
+    const valid = loc.valid === true && Number.isFinite(lat) && Number.isFinite(lon);
+
+    let timestampMs = 0;
+    const ts = Number(raw.timestamp);
+    if (Number.isFinite(ts) && ts > 0) timestampMs = ts > 1e12 ? ts : ts * 1000;
+    if (!timestampMs && raw.timestamp_iso) timestampMs = Date.parse(raw.timestamp_iso) || 0;
+    if (!timestampMs && key) timestampMs = decodePushIdTimestamp(key) || 0;
+
+    return {
+        key,
+        dateKey: raw.history_date || dateKey || '',
+        raw,
+        deviceId: String(raw.device_id || ''),
+        sos: raw.sos === true,
+        uptimeMs: Number(raw.uptime_ms) || 0,
+        timestampMs,
+
+        battery: Number.isFinite(Number(bat.modem_percent)) ? Number(bat.modem_percent) : null,
+
+        wifiConnected: net.wifi_connected === true,
+        wifiSsid: String(net.wifi_ssid || ''),
+        wifiRssi: Number.isFinite(Number(net.wifi_rssi_dbm)) ? Number(net.wifi_rssi_dbm) : null,
+        cellularReady: net.cellular_ready === true,
+
+        valid,
+        lat: valid ? lat : null,
+        lon: valid ? lon : null,
+        source: String(loc.source || 'NONE'),
+        stale: loc.stale === true,
+        accuracy: Number.isFinite(Number(loc.accuracy_m)) ? Number(loc.accuracy_m) : null,
+        locationAgeMs: Number.isFinite(Number(loc.age_ms)) ? Number(loc.age_ms) : null,
+        satellites: Number.isFinite(Number(loc.satellites)) ? Number(loc.satellites) : null,
+
+        nearbyWifi: Array.isArray(raw.nearby_wifi) ? raw.nearby_wifi : []
+    };
+}
+
+function isNewBoardSchema(raw) {
+    return !!(raw && typeof raw === 'object' &&
+        raw.location && typeof raw.location === 'object' &&
+        raw.network && typeof raw.network === 'object' &&
+        raw.battery && typeof raw.battery === 'object');
+}
+
 // ---------------- Map ----------------
 const map = L.map('map', { maxZoom: 20, zoomControl: false })
     .setView([homeLat, homeLon], 17);
@@ -308,57 +369,40 @@ async function useCurrentAsHome() {
 // ---------------- Record normalization ----------------
 // รองรับทั้ง schema ใหม่และข้อมูลเก่า
 function normalizeRecord(raw, key='', dateKey='') {
+    // Prefer the exact schema sent by GeoBeltTracker.ino.
+    if (isNewBoardSchema(raw)) return exactBoardRecord(raw, key, dateKey);
+
+    // Legacy fallback for old /esp32_telemetry records.
     if (!raw || typeof raw !== 'object') return null;
 
-    let battery = null;
-    if (raw.battery && typeof raw.battery === 'object') {
-        battery = raw.battery.modem_percent ?? raw.battery.percent ?? null;
-    } else {
-        battery = raw.battery ?? raw.batt ?? raw.battery_percent ?? null;
-    }
+    let battery = raw.battery ?? raw.batt ?? raw.battery_percent ?? null;
+    let lat = null, lon = null, source = 'NONE', valid = false;
 
-    let lat = null, lon = null, source = 'NONE', accuracy = null, valid = false, stale = false;
-
-    if (raw.location && typeof raw.location === 'object') {
-        lat = Number(raw.location.lat);
-        lon = Number(raw.location.lng ?? raw.location.lon);
-        source = String(raw.location.source || 'NONE');
-        accuracy = raw.location.accuracy_m != null ? Number(raw.location.accuracy_m) : null;
-        valid = raw.location.valid !== false && Number.isFinite(lat) && Number.isFinite(lon);
-        stale = !!raw.location.stale;
-    } else if (raw.gps) {
+    if (raw.gps) {
         const p = parseLegacyGPS(raw.gps);
         if (p) {
-            lat = p.lat; lon = p.lon; source = p.source; valid = true;
+            lat = p.lat;
+            lon = p.lon;
+            source = p.source;
+            valid = true;
         }
     } else if (raw.lat != null && raw.lng != null) {
-        lat = Number(raw.lat); lon = Number(raw.lng);
+        lat = Number(raw.lat);
+        lon = Number(raw.lng);
         source = String(raw.location_source || 'UNKNOWN');
         valid = Number.isFinite(lat) && Number.isFinite(lon);
     }
 
-    let timestampMs = 0;
-    if (raw.timestamp) {
-        const n = Number(raw.timestamp);
-        if (Number.isFinite(n)) timestampMs = n > 1e12 ? n : n * 1000;
-    }
-    if (!timestampMs && raw.timestamp_iso) {
-        timestampMs = Date.parse(raw.timestamp_iso) || 0;
-    }
-    if (!timestampMs && key && key.length >= 8) {
-        timestampMs = decodePushIdTimestamp(key) || 0;
-    }
-
+    let timestampMs = key ? decodePushIdTimestamp(key) : 0;
     return {
         key, dateKey, raw,
-        battery,
-        lat, lon, source, accuracy, valid, stale,
-        timestampMs,
-        sos: !!raw.sos,
-        wifiConnected: !!raw.network?.wifi_connected,
-        wifiSsid: raw.network?.wifi_ssid || '',
-        wifiRssi: raw.network?.wifi_rssi_dbm ?? null,
-        cellularReady: !!raw.network?.cellular_ready
+        deviceId: String(raw.device_id || ''),
+        battery: Number.isFinite(Number(battery)) ? Number(battery) : null,
+        lat, lon, source, accuracy:null, valid, stale:false,
+        timestampMs, sos:!!raw.sos,
+        wifiConnected:false, wifiSsid:'', wifiRssi:null,
+        cellularReady:false,
+        locationAgeMs:null, satellites:null, nearbyWifi:[]
     };
 }
 
@@ -418,9 +462,14 @@ async function discoverDevices() {
         const devices = data && typeof data === 'object' ? Object.keys(data) : [];
 
         select.innerHTML = '';
+
         if (!devices.length) {
-            select.innerHTML = '<option value="">ยังไม่มีข้อมูลรูปแบบใหม่</option>';
-            setStatus('รอข้อมูลจากอุปกรณ์', 'offline');
+            // Old firmware has no /history/<device>/ structure.
+            // Keep the dashboard usable by exposing a legacy pseudo-device.
+            select.innerHTML = '<option value="legacy">ข้อมูลเก่า esp32_telemetry</option>';
+            currentDeviceId = 'legacy';
+            setStatus('ยังไม่พบข้อมูลจาก firmware ใหม่', 'stale');
+            await fetchLegacyLatest();
             return;
         }
 
@@ -438,7 +487,8 @@ async function discoverDevices() {
         await refreshNow();
     } catch(e) {
         console.error(e);
-        select.innerHTML = '<option>เชื่อมต่อ Firebase ไม่สำเร็จ</option>';
+        select.innerHTML = '<option value="">เชื่อมต่อ Firebase ไม่สำเร็จ</option>';
+        setStatus('เชื่อมต่อ Firebase ไม่สำเร็จ', 'offline');
     }
 }
 
@@ -447,7 +497,9 @@ async function changeDevice(id) {
     localStorage.setItem('geobelt_device', id);
     lastDeviceCoords = null;
     latestRecord = null;
-    await refreshNow();
+
+    if (id === 'legacy') await fetchLegacyLatest();
+    else await refreshNow();
 }
 
 // ---------------- Live data ----------------
@@ -471,23 +523,86 @@ async function fetchLastRecordForDate(dateKey) {
     return normalizeRecord(data[key], key, dateKey);
 }
 
-async function fetchLatestRecord() {
-    const today = bangkokDateKey();
-    let rec = await fetchLastRecordForDate(today);
-
-    if (!rec) {
-        const yesterday = new Date(Date.now() - 86400000);
-        rec = await fetchLastRecordForDate(bangkokDateKey(yesterday));
+async function getDeviceDateKeys() {
+    if (!currentDeviceId || currentDeviceId === 'legacy') return [];
+    try {
+        const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}.json?shallow=true`);
+        const data = await r.json();
+        if (!data || typeof data !== 'object') return [];
+        return Object.keys(data);
+    } catch(e) {
+        console.error('date keys:', e);
+        return [];
     }
+}
 
-    if (!rec) {
-        setStatus('ยังไม่พบข้อมูล', 'offline');
+function sortHistoryDateKeys(keys) {
+    return keys.slice().sort((a,b) => {
+        if (a === 'unknown-date') return 1;
+        if (b === 'unknown-date') return -1;
+        return b.localeCompare(a);
+    });
+}
+
+async function fetchLatestRecord() {
+    if (!currentDeviceId) return;
+    if (currentDeviceId === 'legacy') return fetchLegacyLatest();
+
+    const keys = sortHistoryDateKeys(await getDeviceDateKeys());
+    if (!keys.length) {
+        setStatus('ยังไม่พบข้อมูลจากอุปกรณ์', 'offline');
         return;
     }
 
-    latestRecord = rec;
-    latestRecordTimestampMs = rec.timestampMs || decodePushIdTimestamp(rec.key) || Date.now();
-    updateLiveUI(rec);
+    // Normally newest YYYY-MM-DD is enough. If that node is empty, try the next.
+    // unknown-date is also supported for devices whose wall clock has not been set yet.
+    for (const dateKey of keys.slice(0, 4)) {
+        try {
+            const url = `${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${dateKey}.json?orderBy=%22$key%22&limitToLast=1`;
+            const r = await fetch(url);
+            const data = await r.json();
+            if (!data || typeof data !== 'object') continue;
+
+            const entry = Object.entries(data)[0];
+            if (!entry) continue;
+
+            const [key, raw] = entry;
+            const rec = normalizeRecord(raw, key, dateKey);
+            if (!rec) continue;
+
+            latestRecord = rec;
+            latestRecordTimestampMs = rec.timestampMs || Date.now();
+            updateLiveUI(rec);
+            return;
+        } catch(e) {
+            console.error('latest record:', e);
+        }
+    }
+
+    setStatus('พบอุปกรณ์แต่ยังไม่มี Telemetry', 'stale');
+}
+
+async function fetchLegacyLatest() {
+    try {
+        const url = `${FIREBASE_DB_BASE}/${LEGACY_ROOT}.json?orderBy=%22$key%22&limitToLast=1`;
+        const r = await fetch(url);
+        const data = await r.json();
+        if (!data || typeof data !== 'object') {
+            setStatus('ไม่พบข้อมูลเดิม', 'offline');
+            return;
+        }
+
+        const [key, raw] = Object.entries(data)[0];
+        const rec = normalizeRecord(raw, key, '');
+        if (!rec) return;
+
+        latestRecord = rec;
+        latestRecordTimestampMs = rec.timestampMs || Date.now();
+        updateLiveUI(rec);
+    } catch(e) {
+        console.error(e);
+        setStatus('โหลดข้อมูลเดิมไม่สำเร็จ', 'offline');
+    }
 }
 
 function updateLiveUI(rec) {
@@ -516,6 +631,41 @@ function updateLiveUI(rec) {
     document.getElementById('wifi-status').innerText =
         rec.wifiConnected ? `${rec.wifiSsid || 'เชื่อมต่อ'}${rec.wifiRssi != null ? ` (${rec.wifiRssi} dBm)` : ''}` : 'ไม่ได้เชื่อม';
     document.getElementById('cellular-status').innerText = rec.cellularReady ? 'พร้อม' : 'ไม่พร้อม';
+
+    // Fields sent directly by GeoBeltTracker.ino
+    const satEl = document.getElementById('satellite-count');
+    if (satEl) satEl.innerText = rec.satellites == null ? '--' : rec.satellites;
+
+    const fixAgeEl = document.getElementById('location-age');
+    if (fixAgeEl) {
+        fixAgeEl.innerText = rec.locationAgeMs == null
+            ? '--'
+            : rec.locationAgeMs < 1000
+                ? `${rec.locationAgeMs} ms`
+                : `${(rec.locationAgeMs/1000).toFixed(1)} s`;
+    }
+
+    const validityEl = document.getElementById('location-validity');
+    if (validityEl) {
+        if (!rec.valid) validityEl.innerHTML = '<span class="text-rose-400">No Fix</span>';
+        else if (rec.stale) validityEl.innerHTML = '<span class="text-amber-400">พิกัดเก่า</span>';
+        else validityEl.innerHTML = '<span class="text-emerald-400">Fix ใช้งานได้</span>';
+    }
+
+    const wifiList = Array.isArray(rec.nearbyWifi) ? rec.nearbyWifi : [];
+    const wifiCountEl = document.getElementById('nearby-wifi-count');
+    const wifiBestEl = document.getElementById('nearby-wifi-best');
+    if (wifiCountEl) wifiCountEl.innerText = wifiList.length;
+    if (wifiBestEl) {
+        const best = wifiList
+            .filter(x => Number.isFinite(Number(x?.rssi)))
+            .sort((a,b)=>Number(b.rssi)-Number(a.rssi))[0];
+        wifiBestEl.innerText = best
+            ? `แรงสุด ${best.rssi} dBm • ${String(best.bssid || '').toUpperCase()}`
+            : 'ยังไม่มี BSSID';
+    }
+
+    updateRawTelemetryPanel(rec);
 
     const displayTime = rec.timestampMs ? new Date(rec.timestampMs).toLocaleString('th-TH', {timeZone:'Asia/Bangkok'}) : '-';
     document.getElementById('last-update').innerText = `อัปเดตล่าสุด: ${displayTime}`;
@@ -556,6 +706,44 @@ function updateLiveUI(rec) {
         browserNotify('GeoBelt: SOS', 'อุปกรณ์ส่งสัญญาณ SOS');
         addLog('🚨 ได้รับ SOS จากอุปกรณ์');
     }
+}
+
+function updateRawTelemetryPanel(rec) {
+    const summary = document.getElementById('telemetry-summary');
+    const raw = document.getElementById('raw-json');
+
+    if (summary) {
+        summary.innerHTML = [
+            `Device: <b>${escapeHtml(rec.deviceId || currentDeviceId || '-')}</b>`,
+            `History date: <b>${escapeHtml(rec.dateKey || '-')}</b>`,
+            `Uptime: <b>${formatDuration(rec.uptimeMs)}</b>`,
+            `SOS: <b class="${rec.sos ? 'text-rose-400' : 'text-emerald-400'}">${rec.sos ? 'TRUE' : 'false'}</b>`,
+            `Location source: <b>${escapeHtml(rec.source || 'NONE')}</b>`,
+            `Network: <b>${rec.wifiConnected ? 'Wi‑Fi' : (rec.cellularReady ? '4G ready' : 'offline')}</b>`
+        ].join('<br>');
+    }
+
+    if (raw) raw.textContent = JSON.stringify(rec.raw, null, 2);
+}
+
+function formatDuration(ms) {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n < 0) return '-';
+    const sec = Math.floor(n/1000);
+    const d = Math.floor(sec/86400);
+    const h = Math.floor((sec%86400)/3600);
+    const m = Math.floor((sec%3600)/60);
+    const s = sec%60;
+    return `${d ? d+'d ' : ''}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+function escapeHtml(v) {
+    return String(v ?? '')
+        .replaceAll('&','&amp;')
+        .replaceAll('<','&lt;')
+        .replaceAll('>','&gt;')
+        .replaceAll('"','&quot;')
+        .replaceAll("'",'&#39;');
 }
 
 function setStatus(text, state) {
@@ -647,7 +835,8 @@ function openGoogleMaps() {
 
 async function refreshNow() {
     if (!currentDeviceId) return;
-    await fetchLatestRecord();
+    if (currentDeviceId === 'legacy') await fetchLegacyLatest();
+    else await fetchLatestRecord();
 }
 
 // ---------------- History: new structure ----------------
@@ -659,7 +848,7 @@ async function fetchHistoryDates() {
     try {
         const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}.json?shallow=true`);
         const data = await r.json();
-        historyDates = data && typeof data === 'object' ? Object.keys(data).sort().reverse() : [];
+        historyDates = data && typeof data === 'object' ? sortHistoryDateKeys(Object.keys(data)) : [];
         renderHistoryDateList();
         if (historyDates.length) await selectHistoryDate(historyDates[0]);
     } catch(e) {
@@ -681,7 +870,7 @@ function renderHistoryDateList() {
         const b = document.createElement('button');
         b.className = 'history-date-btn' + (currentSelectedDate===dateKey ? ' active':'');
         b.dataset.date = dateKey;
-        b.innerHTML = `📅 ${formatDateThai(dateKey)}<span class="block text-slate-400 font-normal mt-1">ข้อมูลรูปแบบใหม่</span>`;
+        b.innerHTML = `📅 ${dateKey === 'unknown-date' ? 'ยังไม่มีเวลาจริง' : formatDateThai(dateKey)}<span class="block text-slate-400 font-normal mt-1">ข้อมูลจากบอร์ด</span>`;
         b.onclick = () => selectHistoryDate(dateKey);
         list.appendChild(b);
     });
@@ -794,6 +983,8 @@ function selectHistoryRow(index) {
         <div>📅 ${currentSelectedDate?.replace('legacy:','') || '-'}</div>
         <div class="mt-1">📍 ${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}</div>
         <div class="mt-1">${sourceFriendly(rec.source)} ${Number.isFinite(rec.accuracy)?`• ±${Math.round(rec.accuracy)} ม.`:''}</div>
+        <div class="mt-1">🛰️ ดาวเทียม: ${rec.satellites ?? '-'} • อายุ Fix: ${rec.locationAgeMs == null ? '-' : (rec.locationAgeMs/1000).toFixed(1)+' s'}</div>
+        <div class="mt-1">📶 Wi‑Fi: ${rec.wifiConnected ? escapeHtml(rec.wifiSsid || 'เชื่อมต่อ') : 'ไม่เชื่อม'} • 4G: ${rec.cellularReady ? 'พร้อม' : 'ไม่พร้อม'}</div>
         <div class="mt-1">🔋 ${Number.isFinite(Number(rec.battery))?Math.round(Number(rec.battery))+'%':'-'}</div>
     `;
 
@@ -975,7 +1166,7 @@ async function init() {
     await fetchHomeConfigFromFirebase();
     await discoverDevices();
 
-    setInterval(fetchLatestRecord, LIVE_REFRESH_MS);
+    setInterval(() => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(), LIVE_REFRESH_MS);
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
     addLog('ระบบ Dashboard v2 พร้อมใช้งาน');
