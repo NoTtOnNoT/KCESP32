@@ -1,5 +1,5 @@
 // ============================================================
-// GeoBelt Dashboard v2.2
+// GeoBelt Dashboard v2.3
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
@@ -105,6 +105,14 @@ function parseIsoMs(value) {
     return Number.isFinite(ms) ? ms : 0;
 }
 
+// Number(null) === 0 in JavaScript, which can accidentally turn missing
+// telemetry into a real-looking zero (for example battery 0% or satellites 0).
+function nullableNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+}
+
 function isPlausibleTelemetryTime(ms, now=Date.now()) {
     return Number.isFinite(ms) &&
         ms >= MIN_VALID_TELEMETRY_MS &&
@@ -171,9 +179,11 @@ function exactBoardRecord(raw, key='', dateKey='') {
     const net = raw.network && typeof raw.network === 'object' ? raw.network : {};
     const bat = raw.battery && typeof raw.battery === 'object' ? raw.battery : {};
 
-    const lat = Number(loc.lat);
-    const lon = Number(loc.lng);
-    const valid = loc.valid === true && Number.isFinite(lat) && Number.isFinite(lon);
+    const lat = nullableNumber(loc.lat);
+    const lon = nullableNumber(loc.lng);
+    // Prefer the board's explicit valid flag, but still accept coordinates from
+    // partially populated v3 records where the flag is missing.
+    const valid = lat !== null && lon !== null && loc.valid !== false;
 
     const timeInfo = resolveRecordTime(raw, key);
 
@@ -193,11 +203,14 @@ function exactBoardRecord(raw, key='', dateKey='') {
         timestampSource: timeInfo.timestampSource,
         reportedTimeSource: timeInfo.reportedTimeSource,
 
-        battery: Number.isFinite(Number(bat.modem_percent)) ? Number(bat.modem_percent) : null,
+        // Firebase removes properties written as null. Therefore the whole
+        // battery object can legitimately be absent when AT+CBC has no usable
+        // percentage. Missing battery data must stay null, not become 0%.
+        battery: nullableNumber(bat.modem_percent),
 
         wifiConnected: net.wifi_connected === true,
         wifiSsid: String(net.wifi_ssid || ''),
-        wifiRssi: Number.isFinite(Number(net.wifi_rssi_dbm)) ? Number(net.wifi_rssi_dbm) : null,
+        wifiRssi: nullableNumber(net.wifi_rssi_dbm),
         cellularReady: net.cellular_ready === true,
 
         valid,
@@ -205,19 +218,22 @@ function exactBoardRecord(raw, key='', dateKey='') {
         lon: valid ? lon : null,
         source: String(loc.source || 'NONE'),
         stale: loc.stale === true,
-        accuracy: Number.isFinite(Number(loc.accuracy_m)) ? Number(loc.accuracy_m) : null,
-        locationAgeMs: Number.isFinite(Number(loc.age_ms)) ? Number(loc.age_ms) : null,
-        satellites: Number.isFinite(Number(loc.satellites)) ? Number(loc.satellites) : null,
+        accuracy: nullableNumber(loc.accuracy_m),
+        locationAgeMs: nullableNumber(loc.age_ms),
+        satellites: nullableNumber(loc.satellites),
 
         nearbyWifi: Array.isArray(raw.nearby_wifi) ? raw.nearby_wifi : []
     };
 }
 
 function isNewBoardSchema(raw) {
+    // Do NOT require battery/network objects here. Firebase Realtime Database
+    // removes keys whose value is null, so battery can disappear completely when
+    // modem_percent is unavailable. Requiring it made a perfectly valid v3 record
+    // fall into the legacy parser, which caused Location source=NONE, No Fix,
+    // Wi-Fi=offline and nearby Wi-Fi=0 even though raw.location contained data.
     return !!(raw && typeof raw === 'object' &&
-        raw.location && typeof raw.location === 'object' &&
-        raw.network && typeof raw.network === 'object' &&
-        raw.battery && typeof raw.battery === 'object');
+        raw.location && typeof raw.location === 'object');
 }
 
 // ---------------- Map ----------------
@@ -877,11 +893,11 @@ function setStatus(text, state) {
 }
 
 function updateBattery(v) {
-    const value = Number(v);
+    const value = nullableNumber(v);
     const el = document.getElementById('batt-val');
     const bar = document.getElementById('batt-bar');
 
-    if (!Number.isFinite(value)) {
+    if (value === null) {
         el.innerText = '--';
         bar.style.width = '0%';
         bar.className = 'h-2 rounded-full bg-slate-500';
@@ -1300,7 +1316,7 @@ async function init() {
     setInterval(() => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(), LIVE_REFRESH_MS);
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
-    addLog('ระบบ Dashboard v2.2 พร้อมใช้งาน');
+    addLog('ระบบ Dashboard v2.3 พร้อมใช้งาน');
 }
 
 init();
