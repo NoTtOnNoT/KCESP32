@@ -1,177 +1,80 @@
-// กำหนด Firebase URL
-const FIREBASE_URL = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatabase.app/esp32_telemetry.json";
-const FIREBASE_CONFIG_URL = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatabase.app/home_config.json";
+// ============================================================
+// GeoBelt Dashboard v2
+// - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
+// - Loads one day at a time (no 3,000-record global cap)
+// - Legacy /esp32_telemetry can still be loaded page-by-page
+// - NO Telegram bot token is stored in this browser code.
+// ============================================================
 
-// ===================== ตั้งค่า Telegram Bot =====================
-const TELEGRAM_BOT_TOKEN = "8839107909:AAEw_v3RKagQYerl38WIRtmRYf0rc3oDVqY"; 
-const TELEGRAM_CHAT_ID = "8530891463";                                      
-let lastZoneState = null;                                                   
-// ==============================================================
-
-// ===================== ระบบ PIN ป้องกันการแก้ไขขอบเขตบ้าน =====================
-// เก็บ PIN (แบบ salt + SHA-256 hash เหมือนใน auth.js) ไว้ใน Firebase Realtime
-// Database ที่ node "app_settings/home_edit_pin" เพื่อไม่ให้ฝัง PIN ตรงๆ ในโค้ด
-// และสามารถเปลี่ยน PIN ได้เองจากในแอปโดยไม่ต้องแก้ไฟล์
-//
-// หมายเหตุ: ใช้ตัวแปร `db`, ฟังก์ชัน `hashPassword()` และ `generateSalt()`
-// ร่วมกับ auth.js (โหลดก่อนไฟล์นี้ใน index.html)
-// ================================================================
+const FIREBASE_DB_BASE = "https://kcesp32-default-rtdb.asia-southeast1.firebasedatabase.app";
+const HISTORY_ROOT = "history";
+const LEGACY_ROOT = "esp32_telemetry";
+const HOME_CONFIG_PATH = "home_config";
 const HOME_PIN_PATH = "app_settings/home_edit_pin";
 
-// ตรวจสอบ PIN ก่อนอนุญาตให้แก้ไขขอบเขตบ้าน
-// คืนค่า true ถ้าอนุญาต, false ถ้าไม่อนุญาต/ยกเลิก
-async function verifyHomeEditPin() {
-    try {
-        const snapshot = await db.ref(HOME_PIN_PATH).get();
-
-        // ยังไม่เคยตั้งค่า PIN มาก่อน -> ให้ตั้งค่าใหม่ก่อนใช้งานครั้งแรก
-        if (!snapshot.exists()) {
-            return await setupHomeEditPin();
-        }
-
-        const pinData = snapshot.val();
-        const entered = prompt("🔒 กรุณาใส่รหัส PIN เพื่อแก้ไขขอบเขตบ้าน:");
-        if (entered === null) return false; // ผู้ใช้กดยกเลิก
-
-        const trimmed = entered.trim();
-        if (trimmed === "") {
-            alert("กรุณากรอกรหัส PIN");
-            return false;
-        }
-
-        const enteredHash = await hashPassword(trimmed, pinData.salt);
-        if (enteredHash !== pinData.pinHash) {
-            alert("รหัส PIN ไม่ถูกต้อง");
-            addLog("มีความพยายามแก้ไขขอบเขตบ้านด้วย PIN ที่ไม่ถูกต้อง");
-            return false;
-        }
-
-        return true;
-    } catch (error) {
-        console.error("PIN verify error:", error);
-        alert("เกิดข้อผิดพลาดในการตรวจสอบ PIN กรุณาลองใหม่อีกครั้ง");
-        return false;
-    }
-}
-
-// ตั้งค่า PIN ครั้งแรก (เรียกอัตโนมัติเมื่อยังไม่มี PIN ในระบบ)
-async function setupHomeEditPin() {
-    alert("ยังไม่มีการตั้งค่า PIN สำหรับแก้ไขขอบเขตบ้าน กรุณาตั้งค่า PIN ก่อนใช้งานครั้งแรก");
-
-    const pin1 = prompt("🔑 ตั้งรหัส PIN ใหม่ (ตัวเลขอย่างน้อย 4 หลัก):");
-    if (pin1 === null) return false;
-    const trimmed1 = pin1.trim();
-    if (trimmed1.length < 4) {
-        alert("PIN ต้องมีความยาวอย่างน้อย 4 หลัก");
-        return false;
-    }
-
-    const pin2 = prompt("🔑 กรุณายืนยัน PIN อีกครั้ง:");
-    if (pin2 === null) return false;
-    if (trimmed1 !== pin2.trim()) {
-        alert("PIN ทั้งสองครั้งไม่ตรงกัน กรุณาลองใหม่");
-        return false;
-    }
-
-    try {
-        const salt = generateSalt();
-        const pinHash = await hashPassword(trimmed1, salt);
-        await db.ref(HOME_PIN_PATH).set({
-            salt: salt,
-            pinHash: pinHash,
-            updatedAt: firebase.database.ServerValue.TIMESTAMP
-        });
-        alert("ตั้งค่า PIN สำเร็จแล้ว! ระบบจะดำเนินการต่อให้อัตโนมัติ");
-        addLog("ตั้งค่า PIN สำหรับแก้ไขขอบเขตบ้านเรียบร้อยแล้ว");
-        return true;
-    } catch (error) {
-        console.error("PIN setup error:", error);
-        alert("บันทึก PIN ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง");
-        return false;
-    }
-}
-
-// เปลี่ยน PIN (ต้องยืนยัน PIN เดิมก่อน ถ้ายังไม่เคยตั้งจะเข้าสู่ขั้นตอนตั้งใหม่แทน)
-async function changeHomeEditPin() {
-    const verified = await verifyHomeEditPin();
-    if (!verified) return;
-
-    const pin1 = prompt("🔑 กรอกรหัส PIN ใหม่ (ตัวเลขอย่างน้อย 4 หลัก):");
-    if (pin1 === null) return;
-    const trimmed1 = pin1.trim();
-    if (trimmed1.length < 4) {
-        alert("PIN ต้องมีความยาวอย่างน้อย 4 หลัก");
-        return;
-    }
-
-    const pin2 = prompt("🔑 กรุณายืนยัน PIN ใหม่อีกครั้ง:");
-    if (pin2 === null) return;
-    if (trimmed1 !== pin2.trim()) {
-        alert("PIN ทั้งสองครั้งไม่ตรงกัน กรุณาลองใหม่");
-        return;
-    }
-
-    try {
-        const salt = generateSalt();
-        const pinHash = await hashPassword(trimmed1, salt);
-        await db.ref(HOME_PIN_PATH).set({
-            salt: salt,
-            pinHash: pinHash,
-            updatedAt: firebase.database.ServerValue.TIMESTAMP
-        });
-        alert("เปลี่ยน PIN สำเร็จแล้ว");
-        addLog("เปลี่ยน PIN สำหรับแก้ไขขอบเขตบ้านเรียบร้อยแล้ว");
-    } catch (error) {
-        console.error("PIN change error:", error);
-        alert("เปลี่ยน PIN ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง");
-    }
-}
-// ================================================================
-
-// ตั้งค่าธีมเริ่มต้นจาก localStorage
-const savedTheme = localStorage.getItem('theme') || 'dark';
-if (savedTheme === 'light') {
-    document.getElementById('html-root').classList.remove('dark');
-    document.getElementById('theme-icon').innerText = '🌙';
-    document.getElementById('theme-text').innerText = 'โหมดมืด';
-}
-
-function toggleTheme() {
-    const htmlRoot = document.getElementById('html-root');
-    const themeIcon = document.getElementById('theme-icon');
-    const themeText = document.getElementById('theme-text');
-
-    if (htmlRoot.classList.contains('dark')) {
-        htmlRoot.classList.remove('dark');
-        localStorage.setItem('theme', 'light');
-        themeIcon.innerText = '🌙';
-        themeText.innerText = 'โหมดมืด';
-        addLog("เปลี่ยนเป็นโหมดสว่างสำเร็จ");
-    } else {
-        htmlRoot.classList.add('dark');
-        localStorage.setItem('theme', 'dark');
-        themeIcon.innerText = '☀️';
-        themeText.innerText = 'โหมดสว่าง';
-        addLog("เปลี่ยนเป็นโหมดมืดสำเร็จ");
-    }
-}
-
-// ตั้งค่าตำแหน่งบ้านเริ่มต้น
-let homeLat = 6.632795;
-let homeLon = 100.421219;
-let homeRadius = 100; // เมตร
-let isSettingHomeMode = false;
-
-// เริ่มต้นแผนที่หลัก Leaflet
-let map = L.map('map', {
-    maxZoom: 20,
-    zoomControl: false
-}).setView([homeLat, homeLon], 17);
-
-L.control.zoom({ position: 'bottomright' }).addTo(map);
+const LIVE_REFRESH_MS = 5000;
+const STALE_WARNING_SECONDS = 90;
+const OFFLINE_WARNING_SECONDS = 180;
+const LEGACY_PAGE_SIZE = 1000;
 
 const GOOGLE_SUBDOMAINS = ['mt0', 'mt1', 'mt2', 'mt3'];
 const GOOGLE_ATTRIBUTION = '© Google Maps';
+
+// ---------------- Theme ----------------
+const savedTheme = localStorage.getItem('theme') || 'dark';
+if (savedTheme === 'light') {
+    document.getElementById('html-root').classList.remove('dark');
+}
+updateThemeButton();
+
+function updateThemeButton() {
+    const dark = document.getElementById('html-root').classList.contains('dark');
+    const icon = document.getElementById('theme-icon');
+    const text = document.getElementById('theme-text');
+    if (icon) icon.innerText = dark ? '☀️' : '🌙';
+    if (text) text.innerText = dark ? 'โหมดสว่าง' : 'โหมดมืด';
+}
+
+function toggleTheme() {
+    const root = document.getElementById('html-root');
+    root.classList.toggle('dark');
+    localStorage.setItem('theme', root.classList.contains('dark') ? 'dark' : 'light');
+    updateThemeButton();
+}
+
+// ---------------- General state ----------------
+let currentDeviceId = localStorage.getItem('geobelt_device') || '';
+let lastDeviceCoords = null;
+let latestRecord = null;
+let followMode = true;
+let latestRecordTimestampMs = 0;
+
+let homeLat = 6.632795;
+let homeLon = 100.421219;
+let homeRadius = 100;
+let isSettingHomeMode = false;
+let lastZoneState = null;
+
+let historyDates = [];
+let currentSelectedDate = null;
+let currentDayEntries = [];
+let currentFilteredEntries = [];
+let activeHistoryIndex = -1;
+let historyRouteEnabled = false;
+
+let legacyGrouped = {};
+let legacyOldestKey = null;
+let legacyFinished = false;
+
+let historyInlineMap = null;
+let historyInlineMarker = null;
+let historyRouteLine = null;
+
+// ---------------- Map ----------------
+const map = L.map('map', { maxZoom: 20, zoomControl: false })
+    .setView([homeLat, homeLon], 17);
+
+L.control.zoom({ position: 'bottomright' }).addTo(map);
 
 const googleRoadmap = L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
     maxZoom: 21, subdomains: GOOGLE_SUBDOMAINS, attribution: GOOGLE_ATTRIBUTION
@@ -182,747 +85,900 @@ const googleHybrid = L.tileLayer('https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z
 const googleSatellite = L.tileLayer('https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
     maxZoom: 21, subdomains: GOOGLE_SUBDOMAINS, attribution: GOOGLE_ATTRIBUTION
 });
-const googleTerrain = L.tileLayer('https://{s}.google.com/vt/lyrs=p&x={x}&y={y}&z={z}', {
-    maxZoom: 21, subdomains: GOOGLE_SUBDOMAINS, attribution: GOOGLE_ATTRIBUTION
-});
 
 googleHybrid.addTo(map);
-
-const baseMaps = {
-    "🗺️ แผนที่ถนน (Roadmap)": googleRoadmap,
-    "🛰️ ดาวเทียม + ป้ายชื่อ (Hybrid)": googleHybrid,
-    "🌍 ภาพถ่ายดาวเทียมล้วน (Satellite)": googleSatellite,
-    "⛰️ แผนที่ภูมิประเทศ (Terrain)": googleTerrain
-};
-
-L.control.layers(baseMaps, null, { collapsed: true }).addTo(map);
+L.control.layers({
+    "🗺️ ถนน": googleRoadmap,
+    "🛰️ Hybrid": googleHybrid,
+    "🌍 Satellite": googleSatellite
+}, null, { collapsed: true }).addTo(map);
 
 let deviceMarker = null;
+let accuracyCircle = null;
 let homeMarker = null;
 let homeCircle = null;
-let lastDeviceCoords = null;
 
 const homeIcon = L.divIcon({
     className: 'custom-home-icon',
-    html: '<div style="background-color: #8b5cf6; width: 34px; height: 34px; border-radius: 50%; border: 3px solid #ffffff; display: flex; align-items: center; justify-content: center; color: white; font-size: 15px; box-shadow: 0 6px 15px rgba(139, 92, 246, 0.5);">🏠</div>',
-    iconSize: [34, 34],
-    iconAnchor: [17, 17]
+    html: '<div style="background:#8b5cf6;width:34px;height:34px;border-radius:50%;border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 6px 15px rgba(139,92,246,.5)">🏠</div>',
+    iconSize: [34,34], iconAnchor:[17,17]
 });
 
+function createDeviceIcon(source, stale=false) {
+    let bg = '#64748b', icon = '📍';
+    const s = String(source || '').toUpperCase();
+    if (s === 'GNSS' || s === 'GPS') { bg='#10b981'; icon='🛰️'; }
+    else if (s.includes('GOOGLE')) { bg='#3b82f6'; icon='📍'; }
+    else if (s === 'LAST_KNOWN') { bg='#f59e0b'; icon='🕘'; }
+    else if (s === 'LBS') { bg='#f97316'; icon='📡'; }
+    if (stale) bg='#f59e0b';
+
+    return L.divIcon({
+        className:'custom-device-icon',
+        html:`<div style="background:${bg};width:38px;height:38px;border-radius:50%;border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:17px;box-shadow:0 6px 16px rgba(0,0,0,.42)">${icon}</div>`,
+        iconSize:[38,38], iconAnchor:[19,19]
+    });
+}
+
+// ---------------- Logging / notifications ----------------
 function addLog(message) {
-    const logBox = document.getElementById('activity-log');
-    if (!logBox) return;
-    const timeStr = new Date().toLocaleTimeString();
-    const logItem = document.createElement('div');
-    logItem.innerHTML = `<span class="text-slate-500">[${timeStr}]</span> ${message}`;
-    logBox.prepend(logItem);
+    const el = document.getElementById('activity-log');
+    if (!el) return;
+    const row = document.createElement('div');
+    row.innerHTML = `<span class="text-slate-500">[${new Date().toLocaleTimeString('th-TH')}]</span> ${message}`;
+    el.prepend(row);
+    while (el.children.length > 80) el.removeChild(el.lastChild);
 }
 
-// ฟังก์ชันอัปเดต UI แบตเตอรี่แบบเรียลไทม์
-function updateBatteryUI(batteryPercent) {
-    const battVal = document.getElementById('batt-val');
-    const battBar = document.getElementById('batt-bar');
-    const battCard = document.getElementById('card-batt');
-    
-    if (battVal && battBar) {
-        battVal.innerText = batteryPercent;
-        battBar.style.width = batteryPercent + '%';
+async function requestBrowserNotifications() {
+    if (!('Notification' in window)) {
+        alert('เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือน');
+        return;
+    }
+    const result = await Notification.requestPermission();
+    addLog(`สิทธิ์การแจ้งเตือน: ${result}`);
+}
 
-        if (batteryPercent > 50) {
-            battBar.className = "bg-emerald-500 h-2 rounded-full transition-all duration-500";
-            if(battCard) battCard.style.borderLeftColor = "#10b981";
-        } else if (batteryPercent > 20) {
-            battBar.className = "bg-amber-500 h-2 rounded-full transition-all duration-500";
-            if(battCard) battCard.style.borderLeftColor = "#f59e0b";
-        } else {
-            battBar.className = "bg-rose-500 h-2 rounded-full transition-all duration-500 animate-pulse";
-            if(battCard) battCard.style.borderLeftColor = "#f43f5e";
+function browserNotify(title, body) {
+    if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification(title, { body });
+    }
+}
+
+async function createAlertEvent(type, payload={}) {
+    if (!currentDeviceId) return;
+    try {
+        await fetch(`${FIREBASE_DB_BASE}/alerts/${encodeURIComponent(currentDeviceId)}.json`, {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                type,
+                ...payload,
+                created_at: Date.now()
+            })
+        });
+    } catch(e) {
+        console.warn('Alert event write failed', e);
+    }
+}
+
+// ---------------- PIN / home configuration ----------------
+async function verifyHomeEditPin() {
+    if (typeof db === 'undefined' || typeof hashPassword !== 'function') {
+        alert('ไม่พบระบบ auth.js / Firebase db');
+        return false;
+    }
+    try {
+        const snap = await db.ref(HOME_PIN_PATH).get();
+        if (!snap.exists()) return await setupHomeEditPin();
+
+        const pinData = snap.val();
+        const entered = prompt('🔒 กรุณาใส่ PIN เพื่อแก้ไขขอบเขตบ้าน:');
+        if (entered === null) return false;
+
+        const enteredHash = await hashPassword(entered.trim(), pinData.salt);
+        if (enteredHash !== pinData.pinHash) {
+            alert('PIN ไม่ถูกต้อง');
+            return false;
         }
+        return true;
+    } catch(e) {
+        console.error(e);
+        alert('ตรวจสอบ PIN ไม่สำเร็จ');
+        return false;
     }
 }
 
-// ฟังก์ชันส่งข้อความเข้า Telegram Bot
-async function sendTelegramAlert(message) {
-    if (!TELEGRAM_BOT_TOKEN || TELEGRAM_BOT_TOKEN === "YOUR_BOT_TOKEN_HERE" || 
-        !TELEGRAM_CHAT_ID || TELEGRAM_CHAT_ID === "YOUR_CHAT_ID_HERE") {
-        return; 
+async function setupHomeEditPin() {
+    const p1 = prompt('🔑 ตั้ง PIN ใหม่อย่างน้อย 4 หลัก:');
+    if (p1 === null || p1.trim().length < 4) return false;
+    const p2 = prompt('🔑 ยืนยัน PIN อีกครั้ง:');
+    if (p2 === null || p1.trim() !== p2.trim()) {
+        alert('PIN ไม่ตรงกัน');
+        return false;
     }
-
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-    const payload = {
-        chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: 'Markdown'
-    };
-
-    try {
-        await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        addLog("ส่งแจ้งเตือนเข้า Telegram สำเร็จ");
-    } catch (error) {
-        console.error("Telegram Error:", error);
-    }
+    const salt = generateSalt();
+    const pinHash = await hashPassword(p1.trim(), salt);
+    await db.ref(HOME_PIN_PATH).set({
+        salt, pinHash, updatedAt: firebase.database.ServerValue.TIMESTAMP
+    });
+    return true;
 }
 
-function updateHomeOnMap() {
-    if (homeMarker) {
-        homeMarker.setLatLng([homeLat, homeLon]);
-        homeCircle.setLatLng([homeLat, homeLon]);
-        homeCircle.setRadius(homeRadius);
-    } else {
-        homeMarker = L.marker([homeLat, homeLon], { icon: homeIcon }).addTo(map)
-            .bindPopup("<b>🏠 ตำแหน่งบ้านของคุณ</b>");
-        
-        homeCircle = L.circle([homeLat, homeLon], {
-            color: '#8b5cf6',
-            fillColor: '#a78bfa',
-            fillOpacity: 0.18,
-            radius: homeRadius,
-            weight: 2
-        }).addTo(map);
-    }
-    
-    const radiusInput = document.getElementById('input-home-radius');
-    if (radiusInput) radiusInput.value = homeRadius;
-}
+async function changeHomeEditPin() {
+    if (!await verifyHomeEditPin()) return;
+    const p1 = prompt('🔑 PIN ใหม่อย่างน้อย 4 หลัก:');
+    if (!p1 || p1.trim().length < 4) return;
+    const p2 = prompt('🔑 ยืนยัน PIN ใหม่:');
+    if (!p2 || p1.trim() !== p2.trim()) return alert('PIN ไม่ตรงกัน');
 
-async function saveHomeConfigToFirebase() {
-    try {
-        const payload = { lat: homeLat, lon: homeLon, radius: homeRadius };
-        await fetch(FIREBASE_CONFIG_URL, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-    } catch (error) {
-        console.error("Error saving home config to Firebase:", error);
-    }
+    const salt = generateSalt();
+    const pinHash = await hashPassword(p1.trim(), salt);
+    await db.ref(HOME_PIN_PATH).set({
+        salt, pinHash, updatedAt: firebase.database.ServerValue.TIMESTAMP
+    });
+    alert('เปลี่ยน PIN สำเร็จ');
 }
 
 async function fetchHomeConfigFromFirebase() {
     try {
-        const response = await fetch(FIREBASE_CONFIG_URL);
-        const data = await response.json();
-        if (data && data.lat !== undefined && data.lon !== undefined && data.radius !== undefined) {
-            homeLat = parseFloat(data.lat);
-            homeLon = parseFloat(data.lon);
-            homeRadius = parseFloat(data.radius);
-            updateHomeOnMap();
-            if (lastDeviceCoords) checkGeofence(lastDeviceCoords);
-        } else {
-            saveHomeConfigToFirebase();
-            updateHomeOnMap();
+        const r = await fetch(`${FIREBASE_DB_BASE}/${HOME_CONFIG_PATH}.json`);
+        const d = await r.json();
+        if (d && Number.isFinite(Number(d.lat)) && Number.isFinite(Number(d.lon))) {
+            homeLat = Number(d.lat);
+            homeLon = Number(d.lon);
+            homeRadius = Number(d.radius || 100);
         }
-    } catch (error) {
-        updateHomeOnMap();
+    } catch(e) {
+        console.warn('home config:', e);
     }
+    updateHomeOnMap();
 }
 
-// ต้องผ่านการตรวจ PIN ก่อนถึงจะเปิดโหมดคลิกเลือกจากแมพได้
-// (การปิดโหมด เช่น หลังเลือกพิกัดเสร็จ หรือกดปิดเอง ไม่ต้องใส่ PIN ซ้ำ)
-async function toggleMapSelectMode(forceState) {
-    const targetState = forceState !== undefined ? forceState : !isSettingHomeMode;
+async function saveHomeConfigToFirebase() {
+    await fetch(`${FIREBASE_DB_BASE}/${HOME_CONFIG_PATH}.json`, {
+        method:'PUT',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({lat:homeLat, lon:homeLon, radius:homeRadius})
+    });
+}
 
-    // กำลังจะ "เปิด" โหมดแก้ไข (จากปิด -> เปิด) ต้องตรวจ PIN ก่อน
-    if (targetState === true && isSettingHomeMode === false) {
-        const allowed = await verifyHomeEditPin();
-        if (!allowed) return;
-    }
-
-    isSettingHomeMode = targetState;
-    const btn = document.getElementById('btn-map-mode');
-    const instruction = document.getElementById('mode-instruction');
-    const mapEl = document.getElementById('map');
-
-    if (isSettingHomeMode) {
-        btn.classList.remove('bg-slate-700', 'hover:bg-slate-600', 'border-slate-600');
-        btn.classList.add('bg-purple-600', 'hover:bg-purple-700', 'text-white', 'border-purple-500', 'ring-2', 'ring-purple-400');
-        btn.innerHTML = '❌ ปิดโหมดคลิกแผนที่';
-        instruction.classList.remove('hidden');
-        mapEl.classList.add('cursor-crosshair');
-        addLog("เปิดโหมดเลือกพิกัดบ้านจากแผนที่แล้ว");
+function updateHomeOnMap() {
+    if (!homeMarker) {
+        homeMarker = L.marker([homeLat,homeLon], {icon:homeIcon}).addTo(map).bindPopup('<b>🏠 บ้าน</b>');
+        homeCircle = L.circle([homeLat,homeLon], {
+            radius:homeRadius, color:'#8b5cf6', fillColor:'#a78bfa',
+            fillOpacity:.15, weight:2
+        }).addTo(map);
     } else {
-        btn.classList.remove('bg-purple-600', 'hover:bg-purple-700', 'text-white', 'border-purple-500', 'ring-2', 'ring-purple-400');
-        btn.classList.add('bg-slate-700', 'hover:bg-slate-600', 'border-slate-600');
-        btn.innerHTML = '🖱️ คลิกเลือกจากแมพ';
-        instruction.classList.add('hidden');
-        mapEl.classList.remove('cursor-crosshair');
-        addLog("ปิดโหมดเลือกพิกัดบ้านจากแผนที่แล้ว");
+        homeMarker.setLatLng([homeLat,homeLon]);
+        homeCircle.setLatLng([homeLat,homeLon]).setRadius(homeRadius);
     }
+    const input = document.getElementById('input-home-radius');
+    if (input) input.value = homeRadius;
 }
 
-map.on('click', function(e) {
+async function toggleMapSelectMode(forceState) {
+    const next = forceState !== undefined ? forceState : !isSettingHomeMode;
+    if (next && !isSettingHomeMode && !await verifyHomeEditPin()) return;
+
+    isSettingHomeMode = next;
+    document.getElementById('mode-instruction')?.classList.toggle('hidden', !next);
+    document.getElementById('map')?.classList.toggle('map-selecting', next);
+    const btn = document.getElementById('btn-map-mode');
+    if (btn) btn.innerText = next ? '✕ ยกเลิก' : '🖱️ เลือกบนแผนที่';
+}
+
+map.on('click', async e => {
     if (!isSettingHomeMode) return;
     homeLat = e.latlng.lat;
     homeLon = e.latlng.lng;
     updateHomeOnMap();
-    saveHomeConfigToFirebase();
-    addLog(`ปักหมุดบ้านใหม่สำเร็จ: ${homeLat.toFixed(6)}, ${homeLon.toFixed(6)}`);
-    if (lastDeviceCoords) checkGeofence(lastDeviceCoords);
+    await saveHomeConfigToFirebase();
     toggleMapSelectMode(false);
+    if (lastDeviceCoords) checkGeofence(lastDeviceCoords);
 });
 
-// ต้องผ่านการตรวจ PIN ก่อนถึงจะบันทึกรัศมีบ้านได้
 async function saveHomeSettings() {
-    const allowed = await verifyHomeEditPin();
-    if (!allowed) return;
-
-    const radiusInput = document.getElementById('input-home-radius');
-    homeRadius = parseFloat(radiusInput.value);
-
-    if (isNaN(homeRadius) || homeRadius <= 0) {
-        alert("กรุณากรอกตัวเลขรัศมีให้ถูกต้อง");
-        return;
-    }
-
+    if (!await verifyHomeEditPin()) return;
+    const radius = Number(document.getElementById('input-home-radius')?.value);
+    if (!Number.isFinite(radius) || radius < 10) return alert('รัศมีต้องไม่น้อยกว่า 10 เมตร');
+    homeRadius = radius;
     updateHomeOnMap();
-    saveHomeConfigToFirebase();
-    addLog(`อัปเดตรัศมีบ้านเป็น ${homeRadius} เมตร`);
-    alert("บันทึกรัศมีบ้านเรียบร้อยแล้ว!");
+    await saveHomeConfigToFirebase();
     if (lastDeviceCoords) checkGeofence(lastDeviceCoords);
+    alert('บันทึกแล้ว');
 }
 
-// ต้องผ่านการตรวจ PIN ก่อนถึงจะตั้งบ้านจากตำแหน่งปัจจุบันได้
 async function useCurrentAsHome() {
-    const allowed = await verifyHomeEditPin();
-    if (!allowed) return;
+    if (!await verifyHomeEditPin()) return;
+    if (!navigator.geolocation) return alert('เบราว์เซอร์ไม่รองรับตำแหน่ง');
 
-    if (!navigator.geolocation) {
-        alert("เบราว์เซอร์ของคุณไม่รองรับการระบุตำแหน่งปัจจุบัน");
-        return;
-    }
-    navigator.geolocation.getCurrentPosition(
-        (position) => {
-            homeLat = position.coords.latitude;
-            homeLon = position.coords.longitude;
-            updateHomeOnMap();
-            saveHomeConfigToFirebase();
-            map.setView([homeLat, homeLon], 18);
-            addLog(`ตั้งค่าบ้านจากตำแหน่งปัจจุบันสำเร็จ: ${homeLat.toFixed(6)}, ${homeLon.toFixed(6)}`);
-            alert("ตั้งค่าบ้านเป็นตำแหน่งปัจจุบันเรียบร้อยแล้ว!");
-            if (lastDeviceCoords) checkGeofence(lastDeviceCoords);
-        },
-        (error) => {
-            alert("ไม่สามารถดึงตำแหน่งปัจจุบันได้ กรุณาตรวจสอบการอนุญาตสิทธิ์");
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-    );
-}
-
-function copyCoordinates() {
-    if (!lastDeviceCoords) {
-        alert("ยังไม่มีข้อมูลพิกัดอุปกรณ์");
-        return;
-    }
-    const text = `${lastDeviceCoords.lat}, ${lastDeviceCoords.lon}`;
-    navigator.clipboard.writeText(text).then(() => {
-        alert("คัดลอกพิกัดเรียบร้อย: " + text);
+    navigator.geolocation.getCurrentPosition(async pos => {
+        homeLat = pos.coords.latitude;
+        homeLon = pos.coords.longitude;
+        updateHomeOnMap();
+        await saveHomeConfigToFirebase();
+        map.setView([homeLat,homeLon], 18);
+    }, () => alert('ไม่สามารถอ่านตำแหน่งปัจจุบันได้'), {
+        enableHighAccuracy:true, timeout:12000, maximumAge:0
     });
 }
 
-function centerToDevice() {
-    if (lastDeviceCoords) {
-        map.setView([lastDeviceCoords.lat, lastDeviceCoords.lon], 18);
+// ---------------- Record normalization ----------------
+// รองรับทั้ง schema ใหม่และข้อมูลเก่า
+function normalizeRecord(raw, key='', dateKey='') {
+    if (!raw || typeof raw !== 'object') return null;
+
+    let battery = null;
+    if (raw.battery && typeof raw.battery === 'object') {
+        battery = raw.battery.modem_percent ?? raw.battery.percent ?? null;
     } else {
-        alert("ยังไม่พบตำแหน่งพิกัดจากอุปกรณ์");
+        battery = raw.battery ?? raw.batt ?? raw.battery_percent ?? null;
     }
+
+    let lat = null, lon = null, source = 'NONE', accuracy = null, valid = false, stale = false;
+
+    if (raw.location && typeof raw.location === 'object') {
+        lat = Number(raw.location.lat);
+        lon = Number(raw.location.lng ?? raw.location.lon);
+        source = String(raw.location.source || 'NONE');
+        accuracy = raw.location.accuracy_m != null ? Number(raw.location.accuracy_m) : null;
+        valid = raw.location.valid !== false && Number.isFinite(lat) && Number.isFinite(lon);
+        stale = !!raw.location.stale;
+    } else if (raw.gps) {
+        const p = parseLegacyGPS(raw.gps);
+        if (p) {
+            lat = p.lat; lon = p.lon; source = p.source; valid = true;
+        }
+    } else if (raw.lat != null && raw.lng != null) {
+        lat = Number(raw.lat); lon = Number(raw.lng);
+        source = String(raw.location_source || 'UNKNOWN');
+        valid = Number.isFinite(lat) && Number.isFinite(lon);
+    }
+
+    let timestampMs = 0;
+    if (raw.timestamp) {
+        const n = Number(raw.timestamp);
+        if (Number.isFinite(n)) timestampMs = n > 1e12 ? n : n * 1000;
+    }
+    if (!timestampMs && raw.timestamp_iso) {
+        timestampMs = Date.parse(raw.timestamp_iso) || 0;
+    }
+    if (!timestampMs && key && key.length >= 8) {
+        timestampMs = decodePushIdTimestamp(key) || 0;
+    }
+
+    return {
+        key, dateKey, raw,
+        battery,
+        lat, lon, source, accuracy, valid, stale,
+        timestampMs,
+        sos: !!raw.sos,
+        wifiConnected: !!raw.network?.wifi_connected,
+        wifiSsid: raw.network?.wifi_ssid || '',
+        wifiRssi: raw.network?.wifi_rssi_dbm ?? null,
+        cellularReady: !!raw.network?.cellular_ready
+    };
 }
 
-// ตรวจสอบ Geofence พร้อมระบบส่ง Telegram อัตโนมัติ (แก้ไขลิงก์ Google Maps)
-function checkGeofence(coords) {
-    const distance = map.distance([coords.lat, coords.lon], [homeLat, homeLon]);
-    document.getElementById('distance-text').innerText = `ระยะห่างจากบ้าน: ${distance.toFixed(1)} เมตร`;
+function parseLegacyGPS(gps) {
+    if (!gps || String(gps).includes('No Fix')) return null;
+    let s = String(gps).trim();
 
-    const statusEl = document.getElementById('home-zone-status');
-    const cardZone = document.getElementById('card-zone');
-    cardZone.classList.remove('hidden');
-
-    const currentState = (distance <= homeRadius) ? 'IN' : 'OUT';
-
-    if (currentState === 'IN') {
-        statusEl.innerHTML = '<span class="text-emerald-500 font-extrabold flex items-center gap-1">🏠 อยู่ในบ้าน (In Zone)</span>';
-        
-        if (lastZoneState === 'OUT') {
-            sendTelegramAlert(`🏠 *แจ้งเตือน*: อุปกรณ์กลับเข้าสู่พื้นที่บ้านแล้ว!\n📍 ระยะห่าง: ${distance.toFixed(1)} เมตร`);
-        }
-    } else {
-        statusEl.innerHTML = '<span class="text-amber-500 font-extrabold flex items-center gap-1">🚗 ออกนอกบ้าน (Out of Zone)</span>';
-        
-        if (lastZoneState === 'IN' || lastZoneState === null) {
-            // Fix: ลิงก์ Google Maps ที่ถูกต้อง
-            const mapsLink = `https://www.google.com/maps?q=${coords.lat},${coords.lon}`;
-            const msg = `🚨 *แจ้งเตือนฉุกเฉิน!*\n🚗 อุปกรณ์ออกนอกพื้นที่บ้านแล้ว!\n📏 ระยะห่าง: ${distance.toFixed(1)} เมตร\n📍 พิกัด: ${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)}\n🔗 [คลิกเปิดดูบน Google Maps](${mapsLink})`;
-            sendTelegramAlert(msg);
-        }
-    }
-    
-    lastZoneState = currentState;
-}
-
-function parseGPS(gpsString) {
-    if (!gpsString || gpsString === "No Fix" || gpsString.includes("No Fix")) return null;
-
-    // เพิ่มการรองรับ Google Geolocation API (WiFi / Cell)
-    if (gpsString.startsWith("GoogleAPI:")) {
-        let cleanStr = gpsString.replace("GoogleAPI:", "").trim();
-        const parts = cleanStr.split(',');
-        if (parts.length >= 2) {
-            let lat = parseFloat(parts[0]);
-            let lon = parseFloat(parts[1]);
-            if (!isNaN(lat) && !isNaN(lon)) return { lat, lon, type: 'GoogleAPI' };
-        }
-        return null;
+    if (s.startsWith('GoogleAPI:')) {
+        const p = s.slice(10).split(',');
+        const lat=Number(p[0]), lon=Number(p[1]);
+        return Number.isFinite(lat)&&Number.isFinite(lon) ? {lat,lon,source:'GOOGLE'} : null;
     }
 
-    if (gpsString.startsWith("LBS:")) {
-        let lbsClean = gpsString.replace("LBS:", "").trim();
-        const parts = lbsClean.split(',');
-        if (parts.length >= 3) {
-            let lat = parseFloat(parts[1]);
-            let lon = parseFloat(parts[2]);
-            if (!isNaN(lat) && !isNaN(lon)) return { lat, lon, type: 'LBS' };
-        }
-        return null;
+    if (s.startsWith('LBS:')) {
+        const p = s.slice(4).split(',');
+        const lat=Number(p[1]), lon=Number(p[2]);
+        return Number.isFinite(lat)&&Number.isFinite(lon) ? {lat,lon,source:'LBS'} : null;
     }
 
-    let cleanStr = gpsString.replace("GPS:", "").replace("+CGNSSINFO:", "").trim();
-    const parts = cleanStr.split(',');
-
-    let latVal = NaN, lonVal = NaN;
-
-    for (let i = 0; i < parts.length; i++) {
-        if (parts[i] === 'N' || parts[i] === 'S') {
-            latVal = parseFloat(parts[i - 1]);
-            if (parts[i] === 'S') latVal = -latVal;
-        }
-        if (parts[i] === 'E' || parts[i] === 'W') {
-            lonVal = parseFloat(parts[i - 1]);
-            if (parts[i] === 'W') lonVal = -lonVal;
-        }
-    }
-
-    if (!isNaN(latVal) && !isNaN(lonVal) && Math.abs(latVal) <= 90 && Math.abs(lonVal) <= 180) {
-        return { lat: latVal, lon: lonVal, type: 'GPS' };
-    }
-
-    if (parts.length >= 7) {
-        let lat = parseFloat(parts[4]);
-        let lon = parseFloat(parts[6]);
-        if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-            return { lat, lon, type: 'GPS' };
+    s = s.replace('GPS:','').replace('+CGNSSINFO:','').trim();
+    const p = s.split(',');
+    for (let i=0;i<p.length;i++) {
+        if (p[i] === 'N' || p[i] === 'S') {
+            const latRaw = Number(p[i-1]);
+            const ewIndex = p.findIndex((x,idx)=>idx>i && (x==='E'||x==='W'));
+            if (ewIndex > 0) {
+                const lonRaw = Number(p[ewIndex-1]);
+                let lat = nmeaToDecimal(latRaw, false);
+                let lon = nmeaToDecimal(lonRaw, true);
+                if (p[i] === 'S') lat = -lat;
+                if (p[ewIndex] === 'W') lon = -lon;
+                if (Number.isFinite(lat)&&Number.isFinite(lon)) return {lat,lon,source:'GNSS'};
+            }
         }
     }
-
     return null;
 }
 
-function createDeviceIcon(type) {
-    let bgColor = '#f59e0b'; // สีส้มสำหรับ LBS (ค่าเริ่มต้น)
-    let icon = '📡';
-
-    if (type === 'GPS') {
-        bgColor = '#10b981'; // สีเขียวสำหรับ GPS
-        icon = '🛰️';
-    } else if (type === 'GoogleAPI') {
-        bgColor = '#3b82f6'; // สีฟ้าสำหรับ Google API (WiFi)
-        icon = '📍';
-    }
-
-    return L.divIcon({
-        className: 'custom-device-icon',
-        html: `<div style="background-color: ${bgColor}; width: 36px; height: 36px; border-radius: 50%; border: 3px solid #ffffff; display: flex; align-items: center; justify-content: center; color: white; font-size: 16px; box-shadow: 0 6px 15px rgba(0,0,0,0.4);">${icon}</div>`,
-        iconSize: [36, 36],
-        iconAnchor: [18, 18]
-    });
+function nmeaToDecimal(value, longitude=false) {
+    if (!Number.isFinite(value)) return NaN;
+    const degDigits = longitude ? 3 : 2;
+    const str = String(Math.abs(value));
+    const dot = str.indexOf('.');
+    const integerLen = dot >= 0 ? dot : str.length;
+    if (integerLen <= degDigits) return value;
+    const degrees = Math.floor(value / 100);
+    const minutes = Math.abs(value) - Math.abs(degrees)*100;
+    return degrees + minutes/60;
 }
 
-// ==============================================================
-// 🌟 ดึงข้อมูล Real-time (รายการล่าสุด)
-// ==============================================================
-async function fetchFirebaseData() {
+// ---------------- Device discovery ----------------
+async function discoverDevices() {
+    const select = document.getElementById('device-select');
     try {
-        const url = FIREBASE_URL.replace('.json', '.json?orderBy=%22$key%22&limitToLast=1');
-        const response = await fetch(url);
-        const data = await response.json();
-        
-        if (data && Object.keys(data).length > 0) {
-            const latestKey = Object.keys(data)[0]; 
-            const latestData = data[latestKey];
+        const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}.json?shallow=true`);
+        const data = await r.json();
+        const devices = data && typeof data === 'object' ? Object.keys(data) : [];
 
-            document.getElementById('status-text').innerText = "ออนไลน์ (Online)";
-            document.getElementById('last-update').innerText = "อัปเดตล่าสุด: " + new Date().toLocaleTimeString();
+        select.innerHTML = '';
+        if (!devices.length) {
+            select.innerHTML = '<option value="">ยังไม่มีข้อมูลรูปแบบใหม่</option>';
+            setStatus('รอข้อมูลจากอุปกรณ์', 'offline');
+            return;
+        }
 
-            // จัดการข้อมูลแบตเตอรี่จริง
-            const cardBatt = document.getElementById('card-batt');
-            const battVal = latestData.battery !== undefined ? latestData.battery : (latestData.batt !== undefined ? latestData.batt : null);
-            if (cardBatt && battVal !== null && battVal !== undefined) {
-                updateBatteryUI(parseInt(battVal));
-                cardBatt.classList.remove('hidden');
-            } else if (cardBatt) {
-                cardBatt.classList.add('hidden');
-            }
+        devices.sort().forEach(id => {
+            const o = document.createElement('option');
+            o.value = id;
+            o.textContent = id;
+            select.appendChild(o);
+        });
 
-            // GPS / LBS
-            const cardGps = document.getElementById('card-gps');
-            if (latestData.gps !== undefined && latestData.gps !== null) {
-                cardGps.classList.remove('hidden');
-                document.getElementById('gps-status').innerText = latestData.gps;
+        if (!currentDeviceId || !devices.includes(currentDeviceId)) currentDeviceId = devices[0];
+        select.value = currentDeviceId;
+        localStorage.setItem('geobelt_device', currentDeviceId);
 
-                const coords = parseGPS(latestData.gps);
-                if (coords) {
-                    lastDeviceCoords = coords;
-                    
-                    // ค้นหาบรรทัดนี้ในฟังก์ชัน fetchFirebaseData()
-                    document.getElementById('lat-lon-text').innerHTML = `Latitude: ${coords.lat.toFixed(6)}, Longitude: ${coords.lon.toFixed(6)} (<span class="${coords.type === 'GPS' ? 'text-emerald-400' : (coords.type === 'GoogleAPI' ? 'text-blue-400 font-bold' : 'text-amber-400 font-bold')}">${coords.type}</span>)`;
+        await refreshNow();
+    } catch(e) {
+        console.error(e);
+        select.innerHTML = '<option>เชื่อมต่อ Firebase ไม่สำเร็จ</option>';
+    }
+}
 
-                    let popupText = "<b>📡 ตำแหน่งเสามือถือ LBS (ความแม่นยำต่ำ)</b>";
-                    if (coords.type === 'GPS') {
-                        popupText = "<b>🛰️ ตำแหน่งดาวเทียม GPS</b>";
-                    } else if (coords.type === 'GoogleAPI') {
-                        popupText = "<b>📍 ตำแหน่งจากเครือข่าย WiFi (Google API)</b>";
-                    }
-                    const currentIcon = createDeviceIcon(coords.type);
+async function changeDevice(id) {
+    currentDeviceId = id;
+    localStorage.setItem('geobelt_device', id);
+    lastDeviceCoords = null;
+    latestRecord = null;
+    await refreshNow();
+}
 
-                    if (deviceMarker) {
-                        deviceMarker.setLatLng([coords.lat, coords.lon]);
-                        deviceMarker.setIcon(currentIcon);
-                        deviceMarker.bindPopup(popupText);
-                    } else {
-                        deviceMarker = L.marker([coords.lat, coords.lon], { icon: currentIcon }).addTo(map)
-                            .bindPopup(popupText).openPopup();
-                    }
-                    checkGeofence(coords);
-                } else {
-                    document.getElementById('lat-lon-text').innerText = "พิกัด Lat/Lon: รอสัญญาณดาวเทียม (No Fix)";
-                }
-            } else {
-                cardGps.classList.add('hidden');
-            }
+// ---------------- Live data ----------------
+function bangkokDateKey(date=new Date()) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone:'Asia/Bangkok', year:'numeric', month:'2-digit', day:'2-digit'
+    }).formatToParts(date);
+    const obj = Object.fromEntries(parts.map(x=>[x.type,x.value]));
+    return `${obj.year}-${obj.month}-${obj.day}`;
+}
+
+async function fetchLastRecordForDate(dateKey) {
+    if (!currentDeviceId) return null;
+    const url = `${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${dateKey}.json?orderBy=%22$key%22&limitToLast=1`;
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!data || typeof data !== 'object') return null;
+    const keys = Object.keys(data);
+    if (!keys.length) return null;
+    const key = keys[0];
+    return normalizeRecord(data[key], key, dateKey);
+}
+
+async function fetchLatestRecord() {
+    const today = bangkokDateKey();
+    let rec = await fetchLastRecordForDate(today);
+
+    if (!rec) {
+        const yesterday = new Date(Date.now() - 86400000);
+        rec = await fetchLastRecordForDate(bangkokDateKey(yesterday));
+    }
+
+    if (!rec) {
+        setStatus('ยังไม่พบข้อมูล', 'offline');
+        return;
+    }
+
+    latestRecord = rec;
+    latestRecordTimestampMs = rec.timestampMs || decodePushIdTimestamp(rec.key) || Date.now();
+    updateLiveUI(rec);
+}
+
+function updateLiveUI(rec) {
+    const now = Date.now();
+    const ageSec = rec.timestampMs ? Math.max(0, Math.floor((now-rec.timestampMs)/1000)) : null;
+
+    if (ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS) setStatus('อุปกรณ์ออฟไลน์/ข้อมูลเก่า', 'offline');
+    else if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) setStatus('ข้อมูลเริ่มเก่า', 'stale');
+    else setStatus('ออนไลน์', 'live');
+
+    const warning = document.getElementById('data-warning');
+    if (warning) {
+        const warnings = [];
+        if (rec.stale) warnings.push('พิกัดนี้เป็น Last Known ไม่ใช่ Fix ปัจจุบัน');
+        if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) warnings.push(`ไม่ได้รับข้อมูลใหม่ประมาณ ${ageSec} วินาที`);
+        if (rec.source === 'LBS') warnings.push('พิกัด LBS มีความแม่นยำต่ำ ใช้เป็นตัวเลือกสุดท้าย');
+        warning.innerText = warnings.join(' • ');
+        warning.classList.toggle('hidden', warnings.length === 0);
+    }
+
+    updateBattery(rec.battery);
+    document.getElementById('location-source').innerText = sourceFriendly(rec.source);
+    document.getElementById('accuracy-text').innerText =
+        Number.isFinite(rec.accuracy) ? `ความแม่นยำโดยประมาณ ±${Math.round(rec.accuracy)} ม.` : 'ความแม่นยำ: ไม่ระบุ';
+
+    document.getElementById('wifi-status').innerText =
+        rec.wifiConnected ? `${rec.wifiSsid || 'เชื่อมต่อ'}${rec.wifiRssi != null ? ` (${rec.wifiRssi} dBm)` : ''}` : 'ไม่ได้เชื่อม';
+    document.getElementById('cellular-status').innerText = rec.cellularReady ? 'พร้อม' : 'ไม่พร้อม';
+
+    const displayTime = rec.timestampMs ? new Date(rec.timestampMs).toLocaleString('th-TH', {timeZone:'Asia/Bangkok'}) : '-';
+    document.getElementById('last-update').innerText = `อัปเดตล่าสุด: ${displayTime}`;
+    document.getElementById('data-age').innerText = ageSec === null ? 'อายุข้อมูล: -' : `อายุข้อมูล: ${ageSec} วินาที`;
+
+    if (rec.valid) {
+        lastDeviceCoords = {lat:rec.lat, lon:rec.lon, source:rec.source, stale:rec.stale};
+        document.getElementById('lat-lon-text').innerText =
+            `${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)} • ${sourceFriendly(rec.source)}`;
+
+        const icon = createDeviceIcon(rec.source, rec.stale);
+        const popup = `<b>${sourceFriendly(rec.source)}</b><br>${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}${Number.isFinite(rec.accuracy)?`<br>±${Math.round(rec.accuracy)} m`:''}`;
+
+        if (!deviceMarker) {
+            deviceMarker = L.marker([rec.lat,rec.lon], {icon}).addTo(map).bindPopup(popup);
         } else {
-            document.getElementById('status-text').innerText = "ไม่พบข้อมูลในฐานข้อมูล";
+            deviceMarker.setLatLng([rec.lat,rec.lon]).setIcon(icon).bindPopup(popup);
         }
-    } catch (error) {
-        document.getElementById('status-text').innerText = "เชื่อมต่อฐานข้อมูลล้มเหลว";
-        console.error("Firebase fetch error:", error);
+
+        if (accuracyCircle) {
+            accuracyCircle.remove();
+            accuracyCircle = null;
+        }
+        if (Number.isFinite(rec.accuracy) && rec.accuracy > 0 && rec.accuracy <= 5000) {
+            accuracyCircle = L.circle([rec.lat,rec.lon], {
+                radius:rec.accuracy, color:'#60a5fa', fillColor:'#60a5fa',
+                fillOpacity:.07, weight:1
+            }).addTo(map);
+        }
+
+        if (followMode) map.setView([rec.lat,rec.lon], Math.max(map.getZoom(), 17));
+        checkGeofence(lastDeviceCoords);
+    } else {
+        document.getElementById('lat-lon-text').innerText = 'ยังไม่มีพิกัดที่ใช้งานได้';
+    }
+
+    if (rec.sos) {
+        browserNotify('GeoBelt: SOS', 'อุปกรณ์ส่งสัญญาณ SOS');
+        addLog('🚨 ได้รับ SOS จากอุปกรณ์');
     }
 }
 
-fetchHomeConfigFromFirebase();
-fetchFirebaseData();
-setInterval(fetchFirebaseData, 5000);
-setInterval(fetchHomeConfigFromFirebase, 10000);
-
-// ======================================================================
-// 📊 ประวัติข้อมูลย้อนหลัง + Side-by-Side Map
-// ======================================================================
-const PUSH_ID_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
-
-function decodePushIdTimestamp(pushId) {
-    if (!pushId || pushId.length < 8) return null;
-    let ms = 0;
-    for (let i = 0; i < 8; i++) {
-        const idx = PUSH_ID_CHARS.indexOf(pushId.charAt(i));
-        if (idx === -1) return null;
-        ms = ms * 64 + idx;
-    }
-    return ms;
+function setStatus(text, state) {
+    document.getElementById('status-text').innerText = text;
+    const dot = document.getElementById('online-dot');
+    dot.className = `status-dot ${state}`;
 }
 
-let historyGroupedByDate = {};
-let currentSelectedDateKey = null;
-let historyInlineMap = null;
-let historyInlineMarker = null;
-let activeRowIndex = null;
-let currentFilteredEntries = []; // ตัวแปรเก็บรายการหลังกรองไว้เรียกด้วย Index
+function updateBattery(v) {
+    const value = Number(v);
+    const el = document.getElementById('batt-val');
+    const bar = document.getElementById('batt-bar');
 
-async function fetchHistoryData() {
-    const listEl = document.getElementById('history-date-list');
-    listEl.innerHTML = '<div class="text-xs text-slate-400 text-center py-6">กำลังโหลดข้อมูล...</div>';
+    if (!Number.isFinite(value)) {
+        el.innerText = '--';
+        bar.style.width = '0%';
+        bar.className = 'h-2 rounded-full bg-slate-500';
+        return;
+    }
+
+    const p = Math.max(0, Math.min(100, value));
+    el.innerText = Math.round(p);
+    bar.style.width = `${p}%`;
+    bar.className = `h-2 rounded-full transition-all duration-500 ${p>50?'bg-emerald-500':p>20?'bg-amber-500':'bg-rose-500'}`;
+}
+
+function sourceFriendly(s) {
+    s = String(s || 'NONE').toUpperCase();
+    if (s === 'GNSS' || s === 'GPS') return '🛰️ GNSS';
+    if (s.includes('GOOGLE')) return '📍 Google Geolocation';
+    if (s === 'LAST_KNOWN') return '🕘 Last Known';
+    if (s === 'LBS') return '📡 LBS';
+    return '— No Fix';
+}
+
+function sourceClass(s) {
+    s = String(s || '').toUpperCase();
+    if (s === 'GNSS' || s === 'GPS') return 'src-gnss';
+    if (s.includes('GOOGLE')) return 'src-google';
+    if (s === 'LAST_KNOWN') return 'src-last';
+    if (s === 'LBS') return 'src-lbs';
+    return 'src-none';
+}
+
+function checkGeofence(coords) {
+    const distance = map.distance([coords.lat,coords.lon], [homeLat,homeLon]);
+    document.getElementById('distance-text').innerText = `ห่างจากบ้าน ${distance.toFixed(1)} เมตร`;
+
+    const state = distance <= homeRadius ? 'IN' : 'OUT';
+    document.getElementById('home-zone-status').innerHTML =
+        state === 'IN'
+            ? '<span class="text-emerald-400">🏠 อยู่ในพื้นที่บ้าน</span>'
+            : '<span class="text-amber-400">🚗 ออกนอกพื้นที่บ้าน</span>';
+
+    if (lastZoneState && lastZoneState !== state) {
+        if (state === 'OUT') {
+            browserNotify('GeoBelt', `อุปกรณ์ออกนอกพื้นที่บ้าน ${distance.toFixed(0)} เมตร`);
+            createAlertEvent('GEOFENCE_OUT', {distance_m:distance, lat:coords.lat, lng:coords.lon});
+            addLog(`🚨 ออกจากขอบเขตบ้าน (${distance.toFixed(1)} ม.)`);
+        } else {
+            browserNotify('GeoBelt', 'อุปกรณ์กลับเข้าสู่พื้นที่บ้าน');
+            createAlertEvent('GEOFENCE_IN', {distance_m:distance, lat:coords.lat, lng:coords.lon});
+            addLog('🏠 กลับเข้าสู่ขอบเขตบ้าน');
+        }
+    }
+    lastZoneState = state;
+}
+
+function toggleFollowMode() {
+    followMode = !followMode;
+    document.getElementById('follow-btn')?.classList.toggle('active', followMode);
+    if (followMode) centerToDevice();
+}
+
+function centerToDevice() {
+    if (!lastDeviceCoords) return alert('ยังไม่มีพิกัด');
+    map.setView([lastDeviceCoords.lat,lastDeviceCoords.lon], 18);
+}
+
+function copyCoordinates() {
+    if (!lastDeviceCoords) return alert('ยังไม่มีพิกัด');
+    navigator.clipboard.writeText(`${lastDeviceCoords.lat}, ${lastDeviceCoords.lon}`);
+}
+
+function openGoogleMaps() {
+    if (!lastDeviceCoords) return alert('ยังไม่มีพิกัด');
+    window.open(`https://www.google.com/maps?q=${lastDeviceCoords.lat},${lastDeviceCoords.lon}`, '_blank', 'noopener');
+}
+
+async function refreshNow() {
+    if (!currentDeviceId) return;
+    await fetchLatestRecord();
+}
+
+// ---------------- History: new structure ----------------
+async function fetchHistoryDates() {
+    if (!currentDeviceId) return;
+    const list = document.getElementById('history-date-list');
+    list.innerHTML = '<div class="text-xs text-slate-400 text-center py-6">กำลังโหลด...</div>';
 
     try {
-        const url = FIREBASE_URL.replace('.json', '.json?orderBy=%22$key%22&limitToLast=3000');
-        const response = await fetch(url);
-        const data = await response.json();
-
-        historyGroupedByDate = {};
-
-        if (data) {
-            Object.keys(data).forEach((key) => {
-                const entry = data[key];
-                const ms = decodePushIdTimestamp(key);
-                if (!ms) return;
-
-                const dateObj = new Date(ms);
-                const dateKey = dateObj.toLocaleDateString('th-TH', {
-                    timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit'
-                });
-                const timeStr = dateObj.toLocaleTimeString('th-TH', {
-                    timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-                });
-
-                const battVal = entry.battery !== undefined ? entry.battery : (entry.batt !== undefined ? entry.batt : '-');
-
-                if (!historyGroupedByDate[dateKey]) historyGroupedByDate[dateKey] = [];
-                historyGroupedByDate[dateKey].push({
-                    time: timeStr,
-                    rawTime: dateObj.toTimeString().substring(0, 8),
-                    ms: ms,
-                    battery: battVal,
-                    gps: entry.gps || '-'
-                });
-            });
-        }
-
+        const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}.json?shallow=true`);
+        const data = await r.json();
+        historyDates = data && typeof data === 'object' ? Object.keys(data).sort().reverse() : [];
         renderHistoryDateList();
-    } catch (error) {
-        listEl.innerHTML = '<div class="text-xs text-rose-400 text-center py-6">โหลดข้อมูลล้มเหลว กรุณาลองใหม่</div>';
-        console.error("History fetch error:", error);
+        if (historyDates.length) await selectHistoryDate(historyDates[0]);
+    } catch(e) {
+        console.error(e);
+        list.innerHTML = '<div class="text-xs text-rose-400 text-center py-6">โหลดวันไม่สำเร็จ</div>';
     }
 }
 
 function renderHistoryDateList() {
-    const listEl = document.getElementById('history-date-list');
-    const dates = Object.keys(historyGroupedByDate).sort(
-        (a, b) => historyGroupedByDate[b][0].ms - historyGroupedByDate[a][0].ms
-    );
+    const list = document.getElementById('history-date-list');
+    list.innerHTML = '';
 
-    if (dates.length === 0) {
-        listEl.innerHTML = '<div class="text-xs text-slate-400 text-center py-6">ยังไม่มีข้อมูลบันทึกไว้</div>';
-        document.getElementById('history-day-content').innerHTML =
-            '<div class="text-xs text-slate-400 text-center py-10">ไม่พบข้อมูล</div>';
+    if (!historyDates.length && !Object.keys(legacyGrouped).length) {
+        list.innerHTML = '<div class="text-xs text-slate-400 text-center py-6">ยังไม่มีข้อมูลรูปแบบใหม่<br>กด “ข้อมูลเดิม” เพื่ออ่านฐานข้อมูลเก่า</div>';
         return;
     }
 
-    listEl.innerHTML = '';
-    dates.forEach((dateKey, idx) => {
-        const count = historyGroupedByDate[dateKey].length;
-        const btn = document.createElement('button');
-        btn.className = 'history-date-btn w-full text-left text-xs px-3 py-2.5 rounded-xl transition font-medium border border-slate-700/50 hover:border-indigo-500 hover:bg-indigo-950/30 text-slate-300 mb-1.5';
-        btn.innerHTML = `📅 ${dateKey}<span class="block text-slate-400 font-normal mt-0.5">${count} รายการ</span>`;
-        btn.onclick = () => selectHistoryDate(dateKey, btn);
-        listEl.appendChild(btn);
-        if (idx === 0) selectHistoryDate(dateKey, btn);
+    historyDates.forEach(dateKey => {
+        const b = document.createElement('button');
+        b.className = 'history-date-btn' + (currentSelectedDate===dateKey ? ' active':'');
+        b.dataset.date = dateKey;
+        b.innerHTML = `📅 ${formatDateThai(dateKey)}<span class="block text-slate-400 font-normal mt-1">ข้อมูลรูปแบบใหม่</span>`;
+        b.onclick = () => selectHistoryDate(dateKey);
+        list.appendChild(b);
+    });
+
+    Object.keys(legacyGrouped).sort().reverse().forEach(dateKey => {
+        const id = `legacy:${dateKey}`;
+        const b = document.createElement('button');
+        b.className = 'history-date-btn' + (currentSelectedDate===id ? ' active':'');
+        b.dataset.date = id;
+        b.innerHTML = `🗃️ ${formatDateThai(dateKey)}<span class="block text-slate-400 font-normal mt-1">${legacyGrouped[dateKey].length} รายการเดิม</span>`;
+        b.onclick = () => selectHistoryDate(id);
+        list.appendChild(b);
     });
 }
 
-function selectHistoryDate(dateKey, btnEl) {
-    currentSelectedDateKey = dateKey;
-    activeRowIndex = null;
-    document.querySelectorAll('.history-date-btn').forEach(b => {
-        b.classList.remove('bg-indigo-600', 'text-white', 'border-indigo-500');
-    });
-    if (btnEl) btnEl.classList.add('bg-indigo-600', 'text-white', 'border-indigo-500');
+async function selectHistoryDate(dateKey) {
+    currentSelectedDate = dateKey;
+    activeHistoryIndex = -1;
+    document.querySelectorAll('.history-date-btn').forEach(b => b.classList.toggle('active', b.dataset.date === dateKey));
 
-    renderHistoryTableContent();
-}
-
-function renderHistoryTableContent() {
-    const contentEl = document.getElementById('history-day-content');
-    const entries = (historyGroupedByDate[currentSelectedDateKey] || []).slice().sort((a, b) => a.ms - b.ms);
-
-    if (entries.length === 0) {
-        contentEl.innerHTML = '<div class="text-xs text-slate-400 text-center py-10">ไม่มีข้อมูลของวันนี้</div>';
+    if (dateKey.startsWith('legacy:')) {
+        currentDayEntries = legacyGrouped[dateKey.slice(7)] || [];
+        renderHistory();
         return;
     }
 
-    const timeStart = document.getElementById('filter-time-start')?.value || "";
-    const timeEnd = document.getElementById('filter-time-end')?.value || "";
+    document.getElementById('history-table-body').innerHTML =
+        '<tr><td colspan="4" class="text-center text-slate-400 py-8">กำลังโหลด...</td></tr>';
 
-    currentFilteredEntries = entries.filter(e => {
-        if (timeStart && e.time < timeStart) return false;
-        if (timeEnd && e.time > timeEnd) return false;
+    try {
+        const r = await fetch(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(currentDeviceId)}/${dateKey}.json`);
+        const data = await r.json();
+
+        currentDayEntries = data && typeof data === 'object'
+            ? Object.entries(data).map(([key,val])=>normalizeRecord(val,key,dateKey)).filter(Boolean)
+            : [];
+
+        currentDayEntries.sort((a,b)=>(a.timestampMs||0)-(b.timestampMs||0));
+        renderHistory();
+    } catch(e) {
+        console.error(e);
+        currentDayEntries = [];
+        renderHistory();
+    }
+}
+
+function renderHistory() {
+    const body = document.getElementById('history-table-body');
+    const t1 = document.getElementById('filter-time-start')?.value || '';
+    const t2 = document.getElementById('filter-time-end')?.value || '';
+    const sourceFilter = document.getElementById('filter-source')?.value || '';
+
+    currentFilteredEntries = currentDayEntries.filter(rec => {
+        const time = recordTimeString(rec);
+        if (t1 && time < t1) return false;
+        if (t2 && time > t2) return false;
+
+        if (sourceFilter) {
+            const s = String(rec.source||'NONE').toUpperCase();
+            if (sourceFilter === 'GOOGLE' && !s.includes('GOOGLE')) return false;
+            else if (sourceFilter !== 'GOOGLE' && s !== sourceFilter) return false;
+        }
         return true;
     });
 
-    const batts = currentFilteredEntries.map(e => Number(e.battery)).filter(v => !isNaN(v));
-    const latestBatt = batts.length ? batts[batts.length - 1] : (currentFilteredEntries.length ? currentFilteredEntries[currentFilteredEntries.length - 1].battery : '-');
+    document.getElementById('history-count').innerText =
+        `${currentFilteredEntries.length.toLocaleString()} / ${currentDayEntries.length.toLocaleString()} รายการ`;
 
-    let html = `
-    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-3 mb-4 flex flex-wrap gap-3 items-center justify-between">
-        <div class="flex items-center gap-2 text-xs flex-wrap">
-            <span class="text-slate-300 font-semibold">⏰ กรองช่วงเวลา:</span>
-            <input type="time" id="filter-time-start" value="${timeStart}" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-white text-xs">
-            <span class="text-slate-400">ถึง</span>
-            <input type="time" id="filter-time-end" value="${timeEnd}" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-white text-xs">
-            <button onclick="renderHistoryTableContent()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded-lg font-medium transition">กรอง</button>
-            <button onclick="clearTimeFilter()" class="bg-slate-700 hover:bg-slate-600 text-slate-300 px-2 py-1 rounded-lg text-xs transition">ล้างค่า</button>
-        </div>
-        <div class="text-xs text-slate-400">แสดง: <span class="text-white font-bold">${currentFilteredEntries.length}</span> / ${entries.length} รายการ</div>
-    </div>
+    if (!currentFilteredEntries.length) {
+        body.innerHTML = '<tr><td colspan="4" class="text-center text-slate-400 py-10">ไม่พบข้อมูล</td></tr>';
+        updateHistoryRoute();
+        return;
+    }
 
-    <div class="grid grid-cols-2 gap-3 mb-4">
-        <div class="bg-slate-900/40 rounded-xl p-3 text-center border border-slate-800">
-            <p class="text-[11px] text-slate-400 uppercase tracking-wide">แบตเตอรี่ล่าสุด</p>
-            <p class="text-lg font-bold text-emerald-400 mt-1">${latestBatt}${latestBatt !== '-' ? '%' : ''}</p>
-        </div>
-        <div class="bg-slate-900/40 rounded-xl p-3 text-center border border-slate-800">
-            <p class="text-[11px] text-slate-400 uppercase tracking-wide">รายการหลังกรอง</p>
-            <p class="text-lg font-bold text-white mt-1">${currentFilteredEntries.length}</p>
-        </div>
-    </div>
+    body.innerHTML = currentFilteredEntries.map((rec,idx)=>{
+        const coordText = rec.valid ? `${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}` : 'No Fix';
+        const batt = Number.isFinite(Number(rec.battery)) ? `${Math.round(Number(rec.battery))}%` : '-';
+        return `<tr class="history-row ${rec.valid?'valid':'invalid'} ${idx===activeHistoryIndex?'selected':''}" ${rec.valid?`onclick="selectHistoryRow(${idx})"`:''}>
+            <td class="font-mono whitespace-nowrap">🕒 ${recordTimeString(rec)}</td>
+            <td class="text-emerald-400 font-bold">${batt}</td>
+            <td><span class="source-badge ${sourceClass(rec.source)}">${sourceFriendly(rec.source)}</span></td>
+            <td class="max-w-[210px] truncate">${coordText}${rec.stale?' • เก่า':''}</td>
+        </tr>`;
+    }).join('');
 
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-        
-        <div class="lg:col-span-7 bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden flex flex-col">
-            <div class="max-h-[360px] overflow-y-auto">
-                <table class="w-full text-xs">
-                    <thead class="sticky top-0 bg-slate-900 z-10 border-b border-slate-800">
-                        <tr class="text-left text-slate-400">
-                            <th class="py-2.5 px-3 font-semibold">เวลา</th>
-                            <th class="py-2.5 px-3 font-semibold">แบตเตอรี่</th>
-                            <th class="py-2.5 px-3 font-semibold">สถานะ / พิกัด</th>
-                        </tr>
-                    </thead>
-                    <tbody>`;
-
-    if (currentFilteredEntries.length === 0) {
-        html += `<tr><td colspan="3" class="text-center py-8 text-slate-400">ไม่พบข้อมูลในช่วงเวลาที่กำหนด</td></tr>`;
+    if (activeHistoryIndex < 0) {
+        const first = currentFilteredEntries.findIndex(x=>x.valid);
+        if (first >= 0) selectHistoryRow(first);
     } else {
-        currentFilteredEntries.forEach((e, idx) => {
-            const hasValidCoords = parseGPS(e.gps) !== null;
-            const isSelected = activeRowIndex === idx;
-            
-            let rowStyle = hasValidCoords ? 'cursor-pointer hover:bg-indigo-950/40 transition' : 'opacity-50';
-            if (isSelected) {
-                rowStyle += ' bg-indigo-900/60 border-l-4 border-indigo-400';
-            }
-
-            // Fix: เรียกใช้ selectHistoryRow(idx) ผ่าน Index ป้องกันปัญหาสตริงหลุด
-            html += `
-                <tr class="border-b border-slate-800/60 ${rowStyle}" ${hasValidCoords ? `onclick="selectHistoryRow(${idx})"` : ''}>
-                    <td class="py-2.5 px-3 font-mono text-slate-300 whitespace-nowrap">🕒 ${e.time}</td>
-                    <td class="py-2.5 px-3 text-emerald-400 font-semibold whitespace-nowrap">🔋 ${e.battery}${e.battery !== '-' ? '%' : ''}</td>
-                    <td class="py-2.5 px-3 text-slate-400 truncate max-w-[180px]">${e.gps}</td>
-                </tr>`;
-        });
-    }
-
-    html += `
-                    </tbody>
-                </table>
-            </div>
-            <div class="p-2 bg-slate-950/40 text-[11px] text-slate-400 text-center border-t border-slate-800">
-                💡 คลิกที่แถวข้อมูลในตารางเพื่อดูตำแหน่งบนแผนที่ด้านข้าง
-            </div>
-        </div>
-
-        <div class="lg:col-span-5 bg-slate-900/60 border border-slate-800 rounded-2xl p-3 flex flex-col gap-3">
-            <div class="flex items-center justify-between">
-                <h4 class="text-xs font-bold text-white flex items-center gap-1.5">🗺️ ตำแหน่งอุปกรณ์บนแผนที่</h4>
-                <span id="side-map-time-label" class="text-[11px] text-indigo-400 font-mono font-semibold">ยังไม่ได้เลือกรายการ</span>
-            </div>
-            
-            <div id="inline-history-map" class="w-full h-64 lg:h-[300px] rounded-xl border border-slate-700/50 overflow-hidden relative z-0"></div>
-            
-            <div id="inline-history-info" class="text-[11px] text-slate-300 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800 font-mono">
-                กรุณาคลิกเลือกแถวข้อมูลด้านซ้ายเพื่อดูพิกัด
-            </div>
-        </div>
-
-    </div>`;
-
-    contentEl.innerHTML = html;
-
-    if (currentFilteredEntries.length > 0) {
-        const firstValidIdx = currentFilteredEntries.findIndex(e => parseGPS(e.gps) !== null);
-        if (firstValidIdx !== -1) {
-            selectHistoryRow(firstValidIdx);
-        }
+        updateHistoryRoute();
     }
 }
 
-function clearTimeFilter() {
-    const startInput = document.getElementById('filter-time-start');
-    const endInput = document.getElementById('filter-time-end');
-    if (startInput) startInput.value = "";
-    if (endInput) endInput.value = "";
-    renderHistoryTableContent();
+function clearHistoryFilters() {
+    document.getElementById('filter-time-start').value = '';
+    document.getElementById('filter-time-end').value = '';
+    document.getElementById('filter-source').value = '';
+    renderHistory();
 }
 
-// Fix: รับค่าจาก Index ของ Array
 function selectHistoryRow(index) {
-    activeRowIndex = index;
-    const entry = currentFilteredEntries[index];
-    if (!entry) return;
+    activeHistoryIndex = index;
+    const rec = currentFilteredEntries[index];
+    if (!rec || !rec.valid) return;
 
-    const coords = parseGPS(entry.gps);
+    document.querySelectorAll('#history-table-body tr').forEach((r,i)=>r.classList.toggle('selected',i===index));
 
-    const rows = document.querySelectorAll('#history-day-content tbody tr');
-    rows.forEach((r, idx) => {
-        if (idx === index) {
-            r.classList.add('bg-indigo-900/60', 'border-l-4', 'border-indigo-400');
-        } else {
-            r.classList.remove('bg-indigo-900/60', 'border-l-4', 'border-indigo-400');
-        }
-    });
+    document.getElementById('side-map-time-label').innerText = recordTimeString(rec);
+    document.getElementById('inline-history-info').innerHTML = `
+        <div>📅 ${currentSelectedDate?.replace('legacy:','') || '-'}</div>
+        <div class="mt-1">📍 ${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}</div>
+        <div class="mt-1">${sourceFriendly(rec.source)} ${Number.isFinite(rec.accuracy)?`• ±${Math.round(rec.accuracy)} ม.`:''}</div>
+        <div class="mt-1">🔋 ${Number.isFinite(Number(rec.battery))?Math.round(Number(rec.battery))+'%':'-'}</div>
+    `;
 
-    const timeLabel = document.getElementById('side-map-time-label');
-    if (timeLabel) timeLabel.innerText = `เวลา ${entry.time}`;
-
-    const infoEl = document.getElementById('inline-history-info');
-    if (infoEl) {
-        let coordStyle = 'text-amber-300 font-bold'; // LBS
-        if (coords && coords.type === 'GPS') coordStyle = 'text-emerald-300';
-        else if (coords && coords.type === 'GoogleAPI') coordStyle = 'text-blue-300 font-bold';
-
-        infoEl.innerHTML = `
-            <div>📅 วันที่: <span class="text-white">${currentSelectedDateKey}</span> | ⏰ <span class="text-white">${entry.time}</span></div>
-            <div class="mt-1">🔋 แบตเตอรี่: <span class="text-emerald-400 font-bold">${entry.battery}%</span></div>
-            <div class="mt-1 truncate">📍 พิกัด: <span class="${coordStyle}">${coords ? `${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)} (${coords.type})` : 'ไม่มีพิกัด'}</span></div>
-        `;
-    }
-
-    setTimeout(() => {
-        const mapContainer = document.getElementById('inline-history-map');
-        if (!mapContainer) return;
-
+    setTimeout(()=>{
         if (!historyInlineMap) {
-            historyInlineMap = L.map('inline-history-map', { zoomControl: true });
+            historyInlineMap = L.map('inline-history-map', {zoomControl:true});
             L.tileLayer('https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
-                maxZoom: 21, subdomains: GOOGLE_SUBDOMAINS, attribution: GOOGLE_ATTRIBUTION
+                maxZoom:21, subdomains:GOOGLE_SUBDOMAINS, attribution:GOOGLE_ATTRIBUTION
             }).addTo(historyInlineMap);
-        } else {
-            historyInlineMap.invalidateSize();
         }
+        historyInlineMap.invalidateSize();
+        historyInlineMap.setView([rec.lat,rec.lon],18);
 
-        if (coords) {
-            historyInlineMap.setView([coords.lat, coords.lon], 18);
-            const historyIcon = createDeviceIcon(coords.type);
-            
-            if (historyInlineMarker) {
-                historyInlineMarker.setLatLng([coords.lat, coords.lon]);
-                historyInlineMarker.setIcon(historyIcon);
-            } else {
-                historyInlineMarker = L.marker([coords.lat, coords.lon], { icon: historyIcon }).addTo(historyInlineMap);
-            }
-            historyInlineMarker.bindPopup(`<b>⏰ ${entry.time}</b><br>${coords.type}`).openPopup();
-        }
-    }, 100);
+        const icon = createDeviceIcon(rec.source, rec.stale);
+        if (!historyInlineMarker) historyInlineMarker = L.marker([rec.lat,rec.lon],{icon}).addTo(historyInlineMap);
+        else historyInlineMarker.setLatLng([rec.lat,rec.lon]).setIcon(icon);
+
+        updateHistoryRoute();
+    },80);
 }
 
-function openHistoryModal() {
+function toggleHistoryRoute() {
+    historyRouteEnabled = !historyRouteEnabled;
+    document.getElementById('route-btn')?.classList.toggle('active',historyRouteEnabled);
+    updateHistoryRoute();
+}
+
+function updateHistoryRoute() {
+    if (!historyInlineMap) return;
+    if (historyRouteLine) {
+        historyRouteLine.remove();
+        historyRouteLine = null;
+    }
+    if (!historyRouteEnabled) return;
+
+    const pts = currentFilteredEntries.filter(r=>r.valid && r.source !== 'LBS').map(r=>[r.lat,r.lon]);
+    if (pts.length >= 2) {
+        historyRouteLine = L.polyline(pts, {weight:3, opacity:.75}).addTo(historyInlineMap);
+        historyInlineMap.fitBounds(historyRouteLine.getBounds(), {padding:[25,25]});
+    }
+}
+
+function jumpToPickedDate() {
+    const date = document.getElementById('history-date-picker').value;
+    if (!date) return;
+    if (historyDates.includes(date)) return selectHistoryDate(date);
+    if (legacyGrouped[date]) return selectHistoryDate(`legacy:${date}`);
+    alert('ยังไม่มีข้อมูลของวันที่เลือก');
+}
+
+function exportCurrentDayCSV() {
+    if (!currentFilteredEntries.length) return alert('ไม่มีข้อมูลให้ส่งออก');
+    const rows = [['timestamp','time','battery','source','lat','lng','accuracy_m','stale','sos']];
+    currentFilteredEntries.forEach(r => rows.push([
+        r.timestampMs ? new Date(r.timestampMs).toISOString() : '',
+        recordTimeString(r),
+        r.battery ?? '',
+        r.source,
+        r.valid ? r.lat : '',
+        r.valid ? r.lon : '',
+        Number.isFinite(r.accuracy) ? r.accuracy : '',
+        r.stale,
+        r.sos
+    ]));
+
+    const csv = rows.map(row=>row.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob(["\ufeff"+csv], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `GeoBelt_${currentDeviceId}_${(currentSelectedDate||'history').replace(':','_')}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+function csvEscape(v) {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+}
+
+function formatDateThai(dateKey) {
+    const d = new Date(`${dateKey}T12:00:00+07:00`);
+    return Number.isNaN(d.getTime()) ? dateKey : d.toLocaleDateString('th-TH', {
+        timeZone:'Asia/Bangkok', day:'2-digit', month:'2-digit', year:'numeric'
+    });
+}
+
+function recordTimeString(rec) {
+    const ms = rec.timestampMs || decodePushIdTimestamp(rec.key);
+    if (!ms) return '--:--:--';
+    return new Date(ms).toLocaleTimeString('th-TH', {
+        timeZone:'Asia/Bangkok', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false
+    });
+}
+
+// ---------------- Legacy pagination ----------------
+const PUSH_ID_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
+
+function decodePushIdTimestamp(pushId) {
+    if (!pushId || pushId.length < 8) return 0;
+    let ms = 0;
+    for (let i=0;i<8;i++) {
+        const n = PUSH_ID_CHARS.indexOf(pushId[i]);
+        if (n < 0) return 0;
+        ms = ms*64+n;
+    }
+    return ms;
+}
+
+async function loadLegacyPage() {
+    if (legacyFinished) return alert('โหลดข้อมูลเดิมครบแล้ว');
+    let query = `orderBy=%22$key%22&limitToLast=${LEGACY_PAGE_SIZE + (legacyOldestKey ? 1 : 0)}`;
+    if (legacyOldestKey) query += `&endAt=%22${encodeURIComponent(legacyOldestKey)}%22`;
+
+    try {
+        const r = await fetch(`${FIREBASE_DB_BASE}/${LEGACY_ROOT}.json?${query}`);
+        const data = await r.json();
+        if (!data || typeof data !== 'object') {
+            legacyFinished = true;
+            return;
+        }
+
+        let entries = Object.entries(data).sort(([a],[b])=>a.localeCompare(b));
+        if (legacyOldestKey) entries = entries.filter(([k])=>k !== legacyOldestKey);
+        if (!entries.length) {
+            legacyFinished = true;
+            return;
+        }
+
+        legacyOldestKey = entries[0][0];
+
+        entries.forEach(([key,val])=>{
+            const ms = decodePushIdTimestamp(key);
+            if (!ms) return;
+            const dateKey = bangkokDateKey(new Date(ms));
+            if (!legacyGrouped[dateKey]) legacyGrouped[dateKey] = [];
+            const rec = normalizeRecord(val,key,dateKey);
+            if (rec && !legacyGrouped[dateKey].some(x=>x.key===key)) legacyGrouped[dateKey].push(rec);
+        });
+
+        Object.values(legacyGrouped).forEach(arr=>arr.sort((a,b)=>a.timestampMs-b.timestampMs));
+        renderHistoryDateList();
+        document.getElementById('legacy-load-more').classList.remove('hidden');
+
+        if (entries.length < LEGACY_PAGE_SIZE) legacyFinished = true;
+        addLog(`โหลดข้อมูลเดิมเพิ่ม ${entries.length} รายการ`);
+    } catch(e) {
+        console.error(e);
+        alert('โหลดข้อมูลเดิมไม่สำเร็จ');
+    }
+}
+
+// ---------------- Modal ----------------
+async function openHistoryModal() {
     const modal = document.getElementById('history-modal');
     modal.classList.remove('hidden');
     modal.classList.add('flex');
-    fetchHistoryData();
+    await fetchHistoryDates();
 }
 
-// Fix: ลบอินสแตนซ์ของแผนที่ทิ้งเมื่อปิด Modal ป้องกัน Leaflet Error
 function closeHistoryModal() {
     const modal = document.getElementById('history-modal');
     modal.classList.add('hidden');
     modal.classList.remove('flex');
-    
+
     if (historyInlineMap) {
         historyInlineMap.remove();
         historyInlineMap = null;
     }
     historyInlineMarker = null;
+    historyRouteLine = null;
 }
 
-document.getElementById('history-modal').addEventListener('click', function (e) {
-    if (e.target === this) closeHistoryModal();
+document.getElementById('history-modal')?.addEventListener('click', e=>{
+    if (e.target === e.currentTarget) closeHistoryModal();
 });
+
+// ---------------- Startup ----------------
+async function init() {
+    await fetchHomeConfigFromFirebase();
+    await discoverDevices();
+
+    setInterval(fetchLatestRecord, LIVE_REFRESH_MS);
+    setInterval(fetchHomeConfigFromFirebase, 30000);
+
+    addLog('ระบบ Dashboard v2 พร้อมใช้งาน');
+}
+
+init();

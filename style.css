@@ -1,156 +1,187 @@
-/* --- ESP32 IoT Tracking Dashboard - Dual Theme Style --- */
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-    --card-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
-    --hover-shadow: 0 25px 30px -10px rgba(99, 102, 241, 0.25);
+    --panel-dark: rgba(30, 41, 59, .72);
+    --card-dark: rgba(30, 41, 59, .62);
+    --border-dark: rgba(100, 116, 139, .25);
+    --shadow: 0 18px 45px rgba(0,0,0,.18);
 }
 
-body {
-    font-family: 'Plus Jakarta Sans', sans-serif;
-}
+* { box-sizing: border-box; }
+body { font-family: 'Plus Jakarta Sans', sans-serif; }
+#activity-log, .font-mono { font-family: 'JetBrains Mono', monospace; }
 
-font-mono, #activity-log {
-    font-family: 'JetBrains Mono', monospace;
-}
+.dark body { background: #0b1220; color: #f8fafc; }
+.dark .theme-panel { background: var(--panel-dark); backdrop-filter: blur(16px); }
+.dark .theme-card { background: var(--card-dark); backdrop-filter: blur(16px); }
+.dark .theme-border { border-color: var(--border-dark); }
+.dark .theme-input { background: #0f172a; color: #f8fafc; border-color: #334155; }
+.dark .theme-text-primary { color: #fff; }
 
-/* --- Theme Classes (Dark Mode - Default) --- */
-.dark body {
-    background-color: #0f172a;
-    color: #f8fafc;
+html:not(.dark) body { background: #eef2f7; color: #172033; }
+html:not(.dark) .theme-panel,
+html:not(.dark) .theme-card { background: rgba(255,255,255,.92); backdrop-filter: blur(16px); }
+html:not(.dark) .theme-border { border-color: #dbe3ee; }
+html:not(.dark) .theme-input { background: #f8fafc; color: #172033; border-color: #cbd5e1; }
+html:not(.dark) .theme-text-primary { color: #0f172a; }
+
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #475569; border-radius: 10px; }
+
+.dashboard-card {
+    border: 1px solid rgba(100,116,139,.18);
+    box-shadow: var(--shadow);
+    transition: transform .2s ease, border-color .2s ease;
 }
-.dark .theme-panel {
-    background: rgba(30, 41, 59, 0.7);
-    backdrop-filter: blur(16px);
+.dashboard-card:hover { transform: translateY(-2px); border-color: rgba(99,102,241,.42); }
+
+.metric-label { font-size: 11px; color: #94a3b8; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.metric-value { font-size: 28px; font-weight: 800; line-height: 1; }
+
+.toolbar-btn, .primary-btn {
+    border-radius: 12px;
+    padding: 9px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    transition: .18s ease;
+    white-space: nowrap;
 }
-.dark .theme-card {
-    background: rgba(30, 41, 59, 0.6);
-    backdrop-filter: blur(16px);
+.toolbar-btn {
+    background: rgba(51,65,85,.72);
+    border: 1px solid rgba(100,116,139,.5);
+    color: #e2e8f0;
 }
-.dark .theme-text-primary { color: #ffffff; }
-.dark .theme-text-secondary { color: #e2e8f0; }
-.dark .theme-input {
-    background-color: #0f172a;
-    color: #f8fafc;
+.toolbar-btn:hover { background: rgba(71,85,105,.9); }
+.toolbar-btn.active { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,.15); }
+.primary-btn { background: #4f46e5; color: #fff; }
+.primary-btn:hover { background: #4338ca; }
+
+.status-pill {
+    display: flex; align-items: center; gap: 7px;
+    background: rgba(30,41,59,.78);
+    border: 1px solid rgba(100,116,139,.38);
+    border-radius: 999px;
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 700;
 }
-/* Map tiles dark mode filter */
+.status-dot { width: 10px; height: 10px; border-radius: 50%; }
+.status-dot.live { background: #10b981; animation: pulse 1.8s infinite; }
+.status-dot.stale { background: #f59e0b; }
+.status-dot.offline { background: #f43f5e; }
+
+@keyframes pulse { 50% { opacity: .35; transform: scale(1.25); } }
+
+#map {
+    height: 500px; width: 100%;
+    border-radius: 20px;
+    overflow: hidden;
+    border: 1px solid rgba(100,116,139,.2);
+    z-index: 1;
+}
+#map.map-selecting { cursor: crosshair !important; box-shadow: 0 0 0 3px rgba(139,92,246,.45); }
+
 .dark .leaflet-layer,
 .dark .leaflet-control-zoom-in,
 .dark .leaflet-control-zoom-out,
 .dark .leaflet-control-attribution {
     filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
 }
-.dark .leaflet-popup-content-wrapper {
-    background: #1e293b;
-    color: #f8fafc;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-}
-.dark .leaflet-popup-tip {
-    background: #1e293b;
-}
+.dark .leaflet-popup-content-wrapper, .dark .leaflet-popup-tip { background:#1e293b; color:#f8fafc; }
 
-/* --- Theme Classes (Light Mode) --- */
-html:not(.dark) body {
-    background-color: #f1f5f9;
-    color: #1e293b;
-}
-html:not(.dark) .theme-panel {
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(16px);
-}
-html:not(.dark) .theme-card {
-    background: rgba(255, 255, 255, 0.9);
-    backdrop-filter: blur(16px);
-}
-html:not(.dark) .theme-text-primary { color: #0f172a; }
-html:not(.dark) .theme-text-secondary { color: #334155; }
-html:not(.dark) .theme-input {
-    background-color: #f8fafc;
-    color: #1e293b;
-    border-color: #cbd5e1 !important;
-}
-html:not(.dark) .leaflet-popup-content-wrapper {
-    background: #ffffff;
-    color: #1e293b;
-    border: 1px solid #e2e8f0;
-}
-html:not(.dark) .leaflet-popup-tip {
-    background: #ffffff;
-}
-
-/* --- Custom Scrollbar --- */
-::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-}
-::-webkit-scrollbar-track {
-    background: transparent;
-}
-::-webkit-scrollbar-thumb {
-    background: #cbd5e1;
-    border-radius: 4px;
-}
-.dark ::-webkit-scrollbar-thumb {
-    background: #334155;
-}
-
-/* --- Map Container --- */
-#map {
-    height: 480px;
-    width: 100%;
-    border-radius: 1.25rem;
-    z-index: 1;
-    border: 1px solid rgba(100, 100, 100, 0.1);
-}
-
-/* เมื่อเปิดโหมดคลิกแผนที่ เปลี่ยนเคอร์เซอร์เป็นเป้าเล็ง */
-#map.map-selecting {
-    cursor: crosshair !important;
-    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.5);
-}
-
-@media (max-width: 768px) {
-    #map {
-        height: 350px;
-    }
-}
-
-/* --- Dashboard Cards --- */
-.dashboard-card {
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: var(--card-shadow);
-    border: 1px solid rgba(150, 150, 150, 0.1);
-}
-.dashboard-card:hover {
-    transform: translateY(-4px);
-    box-shadow: var(--hover-shadow);
-    border-color: rgba(99, 102, 241, 0.3);
-}
-
-/* --- Leaflet Map Popup --- */
-.leaflet-popup-content-wrapper {
-    border-radius: 1rem;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.15);
-}
-.leaflet-popup-content {
-    margin: 12px 16px;
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    font-size: 13px;
+.warning-banner {
+    border: 1px solid rgba(245,158,11,.45);
+    background: rgba(120,53,15,.25);
+    color: #fcd34d;
+    border-radius: 16px;
+    padding: 12px 15px;
+    font-size: 12px;
     font-weight: 600;
 }
-
-/* --- Animations --- */
-@keyframes soft-pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(1.15); }
+.info-box {
+    border: 1px solid rgba(139,92,246,.45);
+    background: rgba(76,29,149,.2);
+    color: #c4b5fd;
+    border-radius: 12px;
+    padding: 10px;
+    font-size: 12px;
 }
-.pulse-glow {
-    animation: soft-pulse 2s infinite ease-in-out;
+
+.activity-log {
+    background: rgba(15,23,42,.7);
+    border: 1px solid rgba(51,65,85,.7);
+    border-radius: 16px;
+    padding: 12px;
+    height: 155px;
+    overflow-y: auto;
+    font-size: 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
-/* Hide Spinners */
-input[type="number"]::-webkit-outer-spin-button,
-input[type="number"]::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
+.filter-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px;
+    border: 1px solid rgba(100,116,139,.25);
+    border-radius: 14px;
+    background: rgba(15,23,42,.25);
+}
+.small-input { border: 1px solid #334155; border-radius: 9px; padding: 6px 8px; font-size: 11px; }
+
+.table-card, .map-side-card {
+    border: 1px solid rgba(100,116,139,.25);
+    border-radius: 18px;
+    overflow: hidden;
+    background: rgba(15,23,42,.22);
+}
+.map-side-card { padding: 12px; overflow: visible; }
+table thead { background: rgba(15,23,42,.92); }
+table th { color:#94a3b8; font-weight:700; text-align:left; padding:10px 11px; }
+table td { padding:10px 11px; border-top:1px solid rgba(51,65,85,.45); }
+.history-row.valid { cursor:pointer; }
+.history-row.valid:hover { background:rgba(49,46,129,.25); }
+.history-row.selected { background:rgba(49,46,129,.55); box-shadow: inset 4px 0 #818cf8; }
+.history-row.invalid { opacity:.48; }
+
+#inline-history-map {
+    width:100%; height:330px; border-radius:14px; overflow:hidden; margin-top:10px;
+    border:1px solid rgba(100,116,139,.3);
+}
+.history-info {
+    margin-top:10px; padding:10px;
+    background:rgba(15,23,42,.55);
+    border:1px solid rgba(51,65,85,.7);
+    border-radius:12px;
+    font-size:11px;
+}
+
+.history-date-btn {
+    width:100%; text-align:left; padding:10px 11px; margin-bottom:6px;
+    border-radius:12px; border:1px solid rgba(100,116,139,.28);
+    font-size:11px; font-weight:700; color:#cbd5e1;
+    transition:.15s ease;
+}
+.history-date-btn:hover { border-color:#6366f1; background:rgba(49,46,129,.2); }
+.history-date-btn.active { background:#4f46e5; color:white; border-color:#818cf8; }
+
+.source-badge {
+    display:inline-flex; align-items:center; border-radius:999px;
+    padding:3px 7px; font-size:10px; font-weight:800;
+}
+.src-gnss { background:rgba(16,185,129,.16); color:#34d399; }
+.src-google { background:rgba(59,130,246,.16); color:#60a5fa; }
+.src-last { background:rgba(245,158,11,.16); color:#fbbf24; }
+.src-lbs { background:rgba(249,115,22,.16); color:#fb923c; }
+.src-none { background:rgba(100,116,139,.18); color:#94a3b8; }
+
+@media (max-width: 768px) {
+    #map { height: 380px; }
+    #inline-history-map { height: 260px; }
+    .metric-value { font-size: 24px; }
 }
