@@ -74,11 +74,11 @@ export default async function handler(req, res) {
     let text =
       `${title}\n\n` +
       `${message}\n\n` +
-      `อุปกรณ์: ${deviceId}\n` +
-      `เวลา: ${thaiTime}`;
+      `🧍🏼‍♂️อุปกรณ์: ${deviceId}\n` +
+      `🕑เวลา: ${thaiTime}`;
 
     if (distance_m != null) {
-      text += `\nระยะจากบ้าน: ${Math.round(Number(distance_m))} เมตร`;
+      text += `\n📏ระยะจากบ้าน: ${Math.round(Number(distance_m))} เมตร`;
     }
 
     const hasLocation =
@@ -87,7 +87,7 @@ export default async function handler(req, res) {
 
     if (hasLocation) {
       text +=
-        `\nพิกัด: ${Number(lat).toFixed(6)}, ` +
+        `\n📍พิกัด: ${Number(lat).toFixed(6)}, ` +
         `${Number(lng).toFixed(6)}`;
     }
 
