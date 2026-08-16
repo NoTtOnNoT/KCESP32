@@ -1,5 +1,5 @@
 // ============================================================
-// GeoBelt Dashboard v2.4
+// GeoBelt Dashboard v2.5
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
@@ -13,6 +13,7 @@ const HISTORY_ROOT = "history";
 const LEGACY_ROOT = "esp32_telemetry";
 const HOME_CONFIG_PATH = "home_config";
 const HOME_PIN_PATH = "app_settings/home_edit_pin";
+const DEVICE_COMMAND_ROOT = "commands";
 
 const LIVE_REFRESH_MS = 5000;
 const STALE_WARNING_SECONDS = 90;
@@ -301,12 +302,15 @@ function addLog(message) {
 }
 
 async function requestBrowserNotifications() {
-    if (!('Notification' in window)) {
-        alert('เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือน');
-        return;
+    if ('Notification' in window) {
+        const result = await Notification.requestPermission();
+        addLog(`สิทธิ์การแจ้งเตือน: ${result}`);
+    } else {
+        addLog('เบราว์เซอร์นี้ไม่รองรับ Browser Notification');
     }
-    const result = await Notification.requestPermission();
-    addLog(`สิทธิ์การแจ้งเตือน: ${result}`);
+
+    // ปุ่มแจ้งเตือนบนเว็บใช้เป็นปุ่มทดสอบเสียงที่อุปกรณ์ด้วย
+    await sendBoardSound('WEB_ALERT');
 }
 
 function browserNotify(title, body) {
@@ -314,6 +318,43 @@ function browserNotify(title, body) {
         new Notification(title, { body });
     }
 }
+
+async function sendBoardSound(type = 'WEB_ALERT') {
+    if (!currentDeviceId || currentDeviceId === 'legacy') {
+        alert('ยังไม่ได้เลือกอุปกรณ์');
+        return false;
+    }
+
+    const command = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: String(type || 'WEB_ALERT').toUpperCase(),
+        created_at: Date.now()
+    };
+
+    try {
+        await fetchFirebaseJson(
+            `${FIREBASE_DB_BASE}/${DEVICE_COMMAND_ROOT}/${encodeURIComponent(currentDeviceId)}/sound.json`,
+            {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(command)
+            }
+        );
+        addLog(`🔊 ส่งคำสั่งเสียงไปยังบอร์ด: ${command.type}`);
+        return true;
+    } catch (e) {
+        console.error('Board sound command:', e);
+        addLog('ส่งคำสั่งเสียงไปยังบอร์ดไม่สำเร็จ');
+        return false;
+    }
+}
+
+async function sendBoardAlert() {
+    return sendBoardSound('WEB_ALERT');
+}
+
+window.sendBoardSound = sendBoardSound;
+window.sendBoardAlert = sendBoardAlert;
 
 async function createAlertEvent(type, payload = {}) {
     if (!currentDeviceId) return;
@@ -1057,12 +1098,14 @@ function checkGeofence(coords) {
     if (lastZoneState && lastZoneState !== state) {
         if (state === 'OUT') {
             browserNotify('GeoBelt', `อุปกรณ์ออกนอกพื้นที่บ้าน ${distance.toFixed(0)} เมตร`);
+            sendBoardSound('GEOFENCE_OUT');
             createAlertEvent('GEOFENCE_OUT', { distance_m: distance, lat: coords.lat, lng: coords.lon, location_source: coords.source || 'UNKNOWN', home_radius_m: homeRadius });
-            addLog(`🚨 ออกจากขอบเขตบ้าน (${distance.toFixed(1)} ม.)`);
+            addLog(`🚨 ออกจากขอบเขตบ้าน (${distance.toFixed(1)} ม.) • สั่งเสียงเตือนดังที่บอร์ด`);
         } else {
             browserNotify('GeoBelt', 'อุปกรณ์กลับเข้าสู่พื้นที่บ้าน');
+            sendBoardSound('GEOFENCE_IN');
             createAlertEvent('GEOFENCE_IN', { distance_m: distance, lat: coords.lat, lng: coords.lon, location_source: coords.source || 'UNKNOWN', home_radius_m: homeRadius });
-            addLog('🏠 กลับเข้าสู่ขอบเขตบ้าน');
+            addLog('🏠 กลับเข้าสู่ขอบเขตบ้าน • สั่งเสียงติ๊ดเบาที่บอร์ด');
         }
     }
     lastZoneState = state;
