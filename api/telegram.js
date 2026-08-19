@@ -1,146 +1,115 @@
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+// GeoBelt Vercel Telegram endpoint
+// Environment variables required:
+// TELEGRAM_BOT_TOKEN
+// TELEGRAM_CHAT_ID
+
+function finiteNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function safeText(v, fallback = '-') {
+  const s = String(v ?? '').trim();
+  return s || fallback;
+}
+
+function formatAlert(body) {
+  const type = safeText(body.type, 'ALERT').toUpperCase();
+  const deviceId = safeText(body.deviceId || body.device_id, 'Unknown device');
+  const lat = finiteNumber(body.lat);
+  const lng = finiteNumber(body.lng);
+  const distance = finiteNumber(body.distance_m);
+  const battery = finiteNumber(body.battery_percent);
+  const accuracy = finiteNumber(body.accuracy_m);
+  const source = safeText(body.location_source, 'UNKNOWN');
+
+  const titleMap = {
+    GEOFENCE_OUT: '🚨 ออกนอกขอบเขตบ้าน',
+    GEOFENCE_IN: '🏠 กลับเข้าสู่ขอบเขตบ้าน',
+    DEVICE_OFFLINE: '📴 อุปกรณ์ออฟไลน์',
+    DEVICE_ONLINE: '🟢 อุปกรณ์กลับมาออนไลน์',
+    LOW_BATTERY: '🔋 แบตเตอรี่ต่ำ',
+    CRITICAL_BATTERY: '🪫 แบตเตอรี่ใกล้หมด',
+    SOS: '🆘 SOS',
+    TEST: '🧪 ทดสอบการแจ้งเตือน'
+  };
+
+  const lines = [
+    titleMap[type] || `⚠️ ${type}`,
+    `อุปกรณ์: ${deviceId}`
+  ];
+
+  if (distance !== null) lines.push(`ห่างจากบ้าน: ${Math.round(distance)} เมตร`);
+  if (battery !== null) lines.push(`แบตเตอรี่: ${Math.round(battery)}%`);
+  if (lat !== null && lng !== null) {
+    lines.push(`พิกัด: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+    lines.push(`แหล่งพิกัด: ${source}`);
+    if (accuracy !== null) lines.push(`ความแม่นยำ: ±${Math.round(accuracy)} เมตร`);
+    lines.push(`Google Maps: https://www.google.com/maps?q=${lat},${lng}`);
   }
 
+  const when = finiteNumber(body.created_at || body.timestamp_ms);
+  if (when !== null) {
+    try {
+      lines.push(
+        `เวลา: ${new Date(when).toLocaleString('th-TH', {
+          timeZone: 'Asia/Bangkok'
+        })}`
+      );
+    } catch {}
+  }
+
+  return lines.join('\n');
+}
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    return res.status(405).json({ ok: false, error: 'Method not allowed' });
+  }
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+
+  if (!token || !chatId) {
+    return res.status(500).json({
+      ok: false,
+      error: 'Telegram environment variables are not configured'
+    });
+  }
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const text = formatAlert(body);
+
   try {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_CHAT_ID;
-
-    if (!token || !chatId) {
-      return res.status(500).json({
-        error: "Telegram environment variables are missing"
-      });
-    }
-
-    const {
-      type = "UNKNOWN",
-      deviceId = "-",
-      lat,
-      lng,
-      distance_m,
-      battery
-    } = req.body || {};
-
-    let title = "GeoBelt แจ้งเตือน";
-    let message = "";
-
-    switch (type) {
-      case "SOS":
-        title = "🚨 SOS ฉุกเฉิน";
-        message = "อุปกรณ์ส่งสัญญาณขอความช่วยเหลือ";
-        break;
-
-      case "GEOFENCE_OUT":
-        title = "⚠️ ออกจากขอบเขตบ้าน";
-        message = "อุปกรณ์ออกนอกพื้นที่ที่กำหนด";
-        break;
-
-      case "GEOFENCE_IN":
-        title = "🏠 กลับเข้าสู่ขอบเขตบ้าน";
-        message = "อุปกรณ์กลับเข้าสู่พื้นที่บ้านแล้ว";
-        break;
-
-      case "LOW_BATTERY":
-        title = "🔋 แบตเตอรี่ต่ำ";
-        message = `แบตเตอรี่เหลือ ${battery ?? "-"}%`;
-        break;
-
-      case "OFFLINE":
-        title = "📴 อุปกรณ์ออฟไลน์";
-        message = "ไม่ได้รับข้อมูลจากอุปกรณ์ตามเวลาที่กำหนด";
-        break;
-
-      case "ONLINE":
-        title = "🟢 อุปกรณ์ออนไลน์";
-        message = "อุปกรณ์กลับมาออนไลน์แล้ว";
-        break;
-
-      case "TEST":
-        title = "✅ ทดสอบ Telegram";
-        message = "ระบบแจ้งเตือน GeoBelt ทำงานสำเร็จ";
-        break;
-
-      default:
-        message = `เหตุการณ์: ${type}`;
-    }
-
-    const thaiTime = new Date().toLocaleString("th-TH", {
-      timeZone: "Asia/Bangkok",
-      dateStyle: "medium",
-      timeStyle: "medium"
+    const tg = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        disable_web_page_preview: true
+      })
     });
 
-    let text =
-      `${title}\n\n` +
-      `${message}\n\n` +
-      `🧍🏼‍♂️ อุปกรณ์: ${deviceId}\n` +
-      `🕑 เวลา: ${thaiTime}`;
+    const data = await tg.json();
 
-    if (distance_m != null) {
-      text += `\n📏 ระยะจากบ้าน: ${Math.round(Number(distance_m))} เมตร`;
-    }
-
-    const hasLocation =
-      Number.isFinite(Number(lat)) &&
-      Number.isFinite(Number(lng));
-
-    if (hasLocation) {
-      text +=
-        `\n📍 พิกัด: ${Number(lat).toFixed(6)}, ` +
-        `${Number(lng).toFixed(6)}`;
-    }
-
-    const payload = {
-      chat_id: chatId,
-      text
-    };
-
-    if (hasLocation) {
-      payload.reply_markup = {
-        inline_keyboard: [
-          [
-            {
-              text: "📍 เปิด Google Maps",
-              url: `https://www.google.com/maps?q=${lat},${lng}`
-            }
-          ]
-        ]
-      };
-    }
-
-    const telegramResponse = await fetch(
-      `https://api.telegram.org/bot${token}/sendMessage`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      }
-    );
-
-    const result = await telegramResponse.json();
-
-    if (!telegramResponse.ok || !result.ok) {
-      console.error(result);
-      return res.status(500).json({
+    if (!tg.ok || !data.ok) {
+      return res.status(502).json({
         ok: false,
-        error: result.description || "Telegram error"
+        error: data?.description || `Telegram HTTP ${tg.status}`
       });
     }
 
     return res.status(200).json({
       ok: true,
-      messageId: result.result?.message_id
+      deviceId: body.deviceId || body.device_id || null,
+      type: body.type || null
     });
-
-  } catch (error) {
-    console.error(error);
-
+  } catch (e) {
     return res.status(500).json({
       ok: false,
-      error: String(error.message || error)
+      error: e?.message || 'Telegram request failed'
     });
   }
 }

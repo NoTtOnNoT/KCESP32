@@ -1,5 +1,5 @@
 // ============================================================
-// GeoBelt Dashboard v2.8
+// GeoBelt Dashboard v2.9
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
@@ -23,6 +23,16 @@ const LIVE_DATE_CANDIDATE_LIMIT = 4;
 const LEGACY_PAGE_SIZE = 1000;
 const LOW_BATTERY_ALERT_PERCENT = 20;
 const TELEGRAM_ALERTS_ENABLED = true;
+
+// Multi-device alert monitoring
+const DEVICE_ALERT_POLL_MS = 10000;
+const CRITICAL_BATTERY_ALERT_PERCENT = 10;
+
+// Geofence protection against false alarms.
+// A transition must be confirmed by several consecutive reliable fixes.
+const GEOFENCE_CONFIRM_COUNT = 3;
+const GEOFENCE_DEFAULT_MARGIN_M = 20;
+const GEOFENCE_MAX_ACCURACY_FOR_ALERT_M = 120;
 
 const GOOGLE_SUBDOMAINS = ['mt0', 'mt1', 'mt2', 'mt3'];
 const GOOGLE_ATTRIBUTION = '© Google Maps';
@@ -92,8 +102,13 @@ let historyInlineMap = null;
 let historyInlineMarker = null;
 let historyRouteLine = null;
 let lastSosNotifiedIdentity = '';
-let lastConnectivityState = null;
-let lastLowBatteryState = false;
+
+// All-device Telegram monitor state.
+// The selected device controls only what is displayed on the page;
+// alerts are evaluated independently for every discovered device.
+let knownDeviceIds = [];
+const deviceAlertStates = new Map();
+let allDeviceMonitorBusy = false;
 
 
 // ---------------- Time normalization ----------------
@@ -172,10 +187,10 @@ function recordOrderTimeMs(rec) {
 // ---------------- Exact ESP32 telemetry schema ----------------
 // Board sends:
 // device_id, sos, uptime_ms, history_date, timestamp, timestamp_iso,
-// network.{wifi_connected,wifi_ssid,wifi_rssi_dbm,cellular_ready},
+// network.{wifi_connected,wifi_ssid,wifi_rssi_dbm,cellular_ready,
+//          modem_present,sim_ready,network_registered},
 // battery.{modem_percent},
-// location.{valid,source,stale,lat,lng,accuracy_m,age_ms,satellites},
-// nearby_wifi:[{bssid,rssi}]
+// location.{valid,source,stale,lat,lng,accuracy_m,age_ms,satellites}
 function exactBoardRecord(raw, key = '', dateKey = '') {
     if (!raw || typeof raw !== 'object') return null;
 
@@ -306,54 +321,57 @@ function browserNotify(title, body) {
 }
 
 
-async function createAlertEvent(type, payload = {}) {
-    if (!currentDeviceId) return;
+async function createAlertEventForDevice(deviceId, type, payload = {}) {
+    if (!deviceId || deviceId === 'legacy' || !TELEGRAM_ALERTS_ENABLED) return false;
 
     const alertData = {
         type,
-        deviceId: currentDeviceId,
+        deviceId,
         ...payload,
         created_at: Date.now()
     };
 
-    // เก็บประวัติลง Firebase
+    // Keep an alert history separated by device.
     try {
         await fetchFirebaseJson(
-            `${FIREBASE_DB_BASE}/alerts/${encodeURIComponent(currentDeviceId)}.json`,
+            `${FIREBASE_DB_BASE}/alerts/${encodeURIComponent(deviceId)}.json`,
             {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(alertData)
             }
         );
     } catch (e) {
-        console.warn('Alert event write failed', e);
+        console.warn(`Alert history write failed (${deviceId})`, e);
     }
 
-    // ส่ง Telegram ผ่าน Vercel backend
+    // Telegram token remains on the Vercel server, never in app.js.
     try {
         const response = await fetch('/api/telegram', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(alertData)
         });
 
-        const result = await response.json();
+        let result = null;
+        try { result = await response.json(); }
+        catch { result = null; }
 
-        if (!response.ok || !result.ok) {
-            throw new Error(result.error || 'Telegram failed');
+        if (!response.ok || !result?.ok) {
+            throw new Error(result?.error || `Telegram HTTP ${response.status}`);
         }
 
-        addLog(`Telegram ส่งสำเร็จ: ${type}`);
-
+        addLog(`Telegram • ${deviceId} • ${type}`);
+        return true;
     } catch (e) {
-        console.error('Telegram:', e);
-        addLog(`Telegram ส่งไม่สำเร็จ: ${type}`);
+        console.error(`Telegram (${deviceId}):`, e);
+        addLog(`Telegram ไม่สำเร็จ • ${deviceId} • ${type}`);
+        return false;
     }
+}
+
+async function createAlertEvent(type, payload = {}) {
+    return createAlertEventForDevice(currentDeviceId, type, payload);
 }
 
 async function testTelegramAlert() {
@@ -624,6 +642,7 @@ async function discoverDevices() {
     try {
         const data = await fetchFirebaseJson(`${FIREBASE_DB_BASE}/${HISTORY_ROOT}.json?shallow=true`);
         const devices = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data) : [];
+        knownDeviceIds = devices.slice().sort();
 
         select.innerHTML = '';
 
@@ -664,13 +683,298 @@ async function changeDevice(id) {
     latestRecordTimestampMs = 0;
     lastZoneState = null;
     lastSosNotifiedIdentity = '';
-    lastConnectivityState = null;
-    lastLowBatteryState = false;
     if (deviceMarker) { deviceMarker.remove(); deviceMarker = null; }
     if (accuracyCircle) { accuracyCircle.remove(); accuracyCircle = null; }
 
     if (id === 'legacy') await fetchLegacyLatest();
     else await refreshNow();
+}
+
+
+// ---------------- Multi-device latest records / alerts ----------------
+async function fetchLatestRecordForDevice(deviceId) {
+    if (!deviceId || deviceId === 'legacy') return null;
+
+    let keyData = null;
+    try {
+        keyData = await fetchFirebaseJson(
+            `${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(deviceId)}.json?shallow=true`
+        );
+    } catch (e) {
+        console.warn(`date keys (${deviceId})`, e);
+        return null;
+    }
+
+    if (!keyData || typeof keyData !== 'object') return null;
+
+    const keys = sortHistoryDateKeys(
+        Object.keys(keyData).filter(
+            k => k === 'unknown-date' || /^\d{4}-\d{2}-\d{2}$/.test(k)
+        )
+    );
+
+    const dated = keys.filter(k => k !== 'unknown-date').slice(0, LIVE_DATE_CANDIDATE_LIMIT);
+    const candidates = [...dated];
+    if (keys.includes('unknown-date')) candidates.push('unknown-date');
+
+    const records = [];
+
+    for (const dateKey of candidates) {
+        try {
+            const url =
+                `${FIREBASE_DB_BASE}/${HISTORY_ROOT}/${encodeURIComponent(deviceId)}/${encodeURIComponent(dateKey)}.json?orderBy=%22$key%22&limitToLast=1`;
+
+            const data = await fetchFirebaseJson(url);
+            if (!data || typeof data !== 'object') continue;
+
+            const keys2 = Object.keys(data);
+            if (!keys2.length) continue;
+
+            const key = keys2[0];
+            const rec = normalizeRecord(data[key], key, dateKey);
+            if (rec) records.push(rec);
+        } catch (e) {
+            console.warn(`latest (${deviceId}/${dateKey})`, e);
+        }
+    }
+
+    if (!records.length) return null;
+    records.sort((a, b) => recordOrderTimeMs(b) - recordOrderTimeMs(a));
+    return records[0];
+}
+
+function geofenceMeasurement(rec) {
+    if (!rec?.valid || !Number.isFinite(rec.lat) || !Number.isFinite(rec.lon)) {
+        return { state: 'UNKNOWN', distance: null, reason: 'NO_FIX' };
+    }
+
+    const source = String(rec.source || 'NONE').toUpperCase();
+
+    // Never create a zone transition from stale Last Known or coarse LBS.
+    if (rec.stale || source === 'LAST_KNOWN') {
+        return { state: 'UNKNOWN', distance: null, reason: 'STALE' };
+    }
+    if (source === 'LBS') {
+        return { state: 'UNKNOWN', distance: null, reason: 'LBS' };
+    }
+
+    const distance = map.distance([rec.lat, rec.lon], [homeLat, homeLon]);
+    const accuracy = Number.isFinite(Number(rec.accuracy)) ? Math.max(0, Number(rec.accuracy)) : null;
+
+    if (accuracy !== null && accuracy > GEOFENCE_MAX_ACCURACY_FOR_ALERT_M) {
+        return { state: 'UNCERTAIN', distance, accuracy, reason: 'LOW_ACCURACY' };
+    }
+
+    // Google has an explicit accuracy radius. Only call OUT when the whole
+    // uncertainty circle is outside the home radius; likewise for IN.
+    if (accuracy !== null) {
+        if (distance - accuracy > homeRadius) {
+            return { state: 'OUT', distance, accuracy, reason: 'CLEAR' };
+        }
+        if (distance + accuracy < homeRadius) {
+            return { state: 'IN', distance, accuracy, reason: 'CLEAR' };
+        }
+        return { state: 'UNCERTAIN', distance, accuracy, reason: 'BOUNDARY' };
+    }
+
+    // AT+CGPSINFO does not provide a reliable accuracy radius, so use a
+    // conservative dead-band around the boundary.
+    if (distance > homeRadius + GEOFENCE_DEFAULT_MARGIN_M) {
+        return { state: 'OUT', distance, accuracy: null, reason: 'GNSS_MARGIN' };
+    }
+    if (distance < Math.max(0, homeRadius - GEOFENCE_DEFAULT_MARGIN_M)) {
+        return { state: 'IN', distance, accuracy: null, reason: 'GNSS_MARGIN' };
+    }
+
+    return { state: 'UNCERTAIN', distance, accuracy: null, reason: 'BOUNDARY' };
+}
+
+function loadDeviceAlertState(deviceId) {
+    if (deviceAlertStates.has(deviceId)) return deviceAlertStates.get(deviceId);
+
+    let persisted = null;
+    try {
+        persisted = JSON.parse(localStorage.getItem(`geobelt_alert_state_${deviceId}`) || 'null');
+    } catch {}
+
+    const state = {
+        connectivity: persisted?.connectivity || null,
+        batteryLevel: persisted?.batteryLevel || 'NORMAL',
+        geofenceStable: persisted?.geofenceStable || null,
+        outsideCount: 0,
+        insideCount: 0,
+        lastSosIdentity: persisted?.lastSosIdentity || ''
+    };
+
+    deviceAlertStates.set(deviceId, state);
+    return state;
+}
+
+function saveDeviceAlertState(deviceId, state) {
+    try {
+        localStorage.setItem(
+            `geobelt_alert_state_${deviceId}`,
+            JSON.stringify({
+                connectivity: state.connectivity,
+                batteryLevel: state.batteryLevel,
+                geofenceStable: state.geofenceStable,
+                lastSosIdentity: state.lastSosIdentity
+            })
+        );
+    } catch {}
+}
+
+async function evaluateDeviceAlerts(deviceId, rec) {
+    if (!rec) return;
+
+    const state = loadDeviceAlertState(deviceId);
+    const now = Date.now();
+    const receivedMs = rec.receivedAtMs || rec.timestampMs || 0;
+    const ageSec = receivedMs ? Math.max(0, Math.floor((now - receivedMs) / 1000)) : null;
+
+    // 1) Online / offline
+    const connectivity = ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS
+        ? 'OFFLINE'
+        : 'ONLINE';
+
+    if (state.connectivity === null) {
+        state.connectivity = connectivity;
+    } else if (state.connectivity !== connectivity) {
+        if (connectivity === 'OFFLINE') {
+            await createAlertEventForDevice(deviceId, 'DEVICE_OFFLINE', {
+                last_seen_ms: receivedMs || null,
+                age_seconds: ageSec,
+                lat: rec.valid ? rec.lat : null,
+                lng: rec.valid ? rec.lon : null,
+                location_source: rec.source || 'NONE'
+            });
+        } else {
+            await createAlertEventForDevice(deviceId, 'DEVICE_ONLINE', {
+                timestamp_ms: receivedMs || Date.now(),
+                lat: rec.valid ? rec.lat : null,
+                lng: rec.valid ? rec.lon : null,
+                location_source: rec.source || 'NONE'
+            });
+        }
+        state.connectivity = connectivity;
+    }
+
+    // Do not create fresh location/battery/SOS alerts from an offline old record.
+    if (connectivity === 'OFFLINE') {
+        saveDeviceAlertState(deviceId, state);
+        return;
+    }
+
+    // 2) Battery: NORMAL > LOW <=20 > CRITICAL <=10
+    let batteryLevel = 'NORMAL';
+    if (rec.battery !== null && Number.isFinite(Number(rec.battery))) {
+        const p = Number(rec.battery);
+        if (p <= CRITICAL_BATTERY_ALERT_PERCENT) batteryLevel = 'CRITICAL';
+        else if (p <= LOW_BATTERY_ALERT_PERCENT) batteryLevel = 'LOW';
+    }
+
+    if (batteryLevel !== state.batteryLevel) {
+        if (batteryLevel === 'LOW') {
+            await createAlertEventForDevice(deviceId, 'LOW_BATTERY', {
+                battery_percent: Number(rec.battery),
+                timestamp_ms: receivedMs || Date.now(),
+                lat: rec.valid ? rec.lat : null,
+                lng: rec.valid ? rec.lon : null
+            });
+        } else if (batteryLevel === 'CRITICAL') {
+            await createAlertEventForDevice(deviceId, 'CRITICAL_BATTERY', {
+                battery_percent: Number(rec.battery),
+                timestamp_ms: receivedMs || Date.now(),
+                lat: rec.valid ? rec.lat : null,
+                lng: rec.valid ? rec.lon : null
+            });
+        }
+        state.batteryLevel = batteryLevel;
+    }
+
+    // 3) SOS: each new telemetry record carrying SOS can notify independently.
+    if (rec.sos) {
+        const sosIdentity = `${deviceId}|${rec.dateKey}|${rec.key || receivedMs}`;
+        if (sosIdentity !== state.lastSosIdentity) {
+            state.lastSosIdentity = sosIdentity;
+            await createAlertEventForDevice(deviceId, 'SOS', {
+                timestamp_ms: receivedMs || Date.now(),
+                lat: rec.valid ? rec.lat : null,
+                lng: rec.valid ? rec.lon : null,
+                location_source: rec.source || 'NONE'
+            });
+        }
+    }
+
+    // 4) Geofence: require 3 consecutive reliable fixes.
+    const zone = geofenceMeasurement(rec);
+
+    if (zone.state === 'OUT') {
+        state.outsideCount += 1;
+        state.insideCount = 0;
+
+        if (state.outsideCount >= GEOFENCE_CONFIRM_COUNT &&
+            state.geofenceStable !== 'OUT') {
+
+            state.geofenceStable = 'OUT';
+            state.outsideCount = 0;
+
+            await createAlertEventForDevice(deviceId, 'GEOFENCE_OUT', {
+                distance_m: zone.distance,
+                accuracy_m: zone.accuracy,
+                lat: rec.lat,
+                lng: rec.lon,
+                location_source: rec.source || 'UNKNOWN',
+                home_radius_m: homeRadius,
+                confirmation_count: GEOFENCE_CONFIRM_COUNT
+            });
+        }
+    } else if (zone.state === 'IN') {
+        state.insideCount += 1;
+        state.outsideCount = 0;
+
+        if (state.insideCount >= GEOFENCE_CONFIRM_COUNT) {
+            if (state.geofenceStable === 'OUT') {
+                await createAlertEventForDevice(deviceId, 'GEOFENCE_IN', {
+                    distance_m: zone.distance,
+                    accuracy_m: zone.accuracy,
+                    lat: rec.lat,
+                    lng: rec.lon,
+                    location_source: rec.source || 'UNKNOWN',
+                    home_radius_m: homeRadius,
+                    confirmation_count: GEOFENCE_CONFIRM_COUNT
+                });
+            }
+            state.geofenceStable = 'IN';
+            state.insideCount = 0;
+        }
+    } else {
+        // Uncertain/no-fix must not push a state across the boundary.
+        state.outsideCount = 0;
+        state.insideCount = 0;
+    }
+
+    saveDeviceAlertState(deviceId, state);
+}
+
+async function monitorAllDeviceAlerts() {
+    if (allDeviceMonitorBusy || !knownDeviceIds.length) return;
+    allDeviceMonitorBusy = true;
+
+    try {
+        await Promise.all(
+            knownDeviceIds.map(async deviceId => {
+                try {
+                    const rec = await fetchLatestRecordForDevice(deviceId);
+                    if (rec) await evaluateDeviceAlerts(deviceId, rec);
+                } catch (e) {
+                    console.warn(`monitor ${deviceId}:`, e);
+                }
+            })
+        );
+    } finally {
+        allDeviceMonitorBusy = false;
+    }
 }
 
 // ---------------- Live data ----------------
@@ -791,47 +1095,7 @@ function updateLiveUI(rec) {
     else if (!displayTimestampMs) setStatus('ออนไลน์ • ยังไม่มีเวลาจริง', 'stale');
     else setStatus('ออนไลน์', 'live');
 
-    // Telegram alert state transitions. These only fire when the state changes,
-    // preventing the 5-second live refresh from spamming duplicate alerts.
-    const connectivityState =
-        ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS ? 'OFFLINE' : 'ONLINE';
-
-    if (lastConnectivityState && connectivityState !== lastConnectivityState) {
-        if (connectivityState === 'OFFLINE') {
-            createAlertEvent('DEVICE_OFFLINE', {
-                last_seen_ms: displayTimestampMs || null,
-                age_seconds: ageSec,
-                lat: rec.valid ? rec.lat : null,
-                lng: rec.valid ? rec.lon : null,
-                location_source: rec.source || 'NONE'
-            });
-            addLog('📴 อุปกรณ์ออฟไลน์ • ส่งเข้าคิว Telegram');
-        } else {
-            createAlertEvent('DEVICE_ONLINE', {
-                timestamp_ms: displayTimestampMs || Date.now(),
-                lat: rec.valid ? rec.lat : null,
-                lng: rec.valid ? rec.lon : null,
-                location_source: rec.source || 'NONE'
-            });
-            addLog('🟢 อุปกรณ์กลับมาออนไลน์ • ส่งเข้าคิว Telegram');
-        }
-    }
-    lastConnectivityState = connectivityState;
-
-    const lowBatteryNow = rec.battery !== null &&
-        Number.isFinite(Number(rec.battery)) &&
-        Number(rec.battery) <= LOW_BATTERY_ALERT_PERCENT;
-
-    if (lowBatteryNow && !lastLowBatteryState) {
-        createAlertEvent('LOW_BATTERY', {
-            battery_percent: Number(rec.battery),
-            timestamp_ms: displayTimestampMs || Date.now(),
-            lat: rec.valid ? rec.lat : null,
-            lng: rec.valid ? rec.lon : null
-        });
-        addLog(`🔋 แบตเตอรี่ต่ำ ${Math.round(Number(rec.battery))}% • ส่งเข้าคิว Telegram`);
-    }
-    lastLowBatteryState = lowBatteryNow;
+    // Telegram alerts are monitored for every device by monitorAllDeviceAlerts().
 
     const warning = document.getElementById('data-warning');
     if (warning) {
@@ -1036,27 +1300,39 @@ function sourceClass(s) {
 }
 
 function checkGeofence(coords) {
-    const distance = map.distance([coords.lat, coords.lon], [homeLat, homeLon]);
-    document.getElementById('distance-text').innerText = `ห่างจากบ้าน ${distance.toFixed(1)} เมตร`;
+    const rec = {
+        valid: true,
+        lat: coords.lat,
+        lon: coords.lon,
+        source: coords.source,
+        stale: coords.stale,
+        accuracy: latestRecord?.accuracy ?? null
+    };
 
-    const state = distance <= homeRadius ? 'IN' : 'OUT';
-    document.getElementById('home-zone-status').innerHTML =
-        state === 'IN'
-            ? '<span class="text-emerald-400">🏠 อยู่ในพื้นที่บ้าน</span>'
-            : '<span class="text-amber-400">🚗 ออกนอกพื้นที่บ้าน</span>';
+    const zone = geofenceMeasurement(rec);
+    const distanceEl = document.getElementById('distance-text');
+    const zoneEl = document.getElementById('home-zone-status');
 
-    if (lastZoneState && lastZoneState !== state) {
-        if (state === 'OUT') {
-            browserNotify('GeoBelt', `อุปกรณ์ออกนอกพื้นที่บ้าน ${distance.toFixed(0)} เมตร`);
-            createAlertEvent('GEOFENCE_OUT', { distance_m: distance, lat: coords.lat, lng: coords.lon, location_source: coords.source || 'UNKNOWN', home_radius_m: homeRadius });
-            addLog(`🚨 ออกจากขอบเขตบ้าน (${distance.toFixed(1)} ม.)`);
-        } else {
-            browserNotify('GeoBelt', 'อุปกรณ์กลับเข้าสู่พื้นที่บ้าน');
-            createAlertEvent('GEOFENCE_IN', { distance_m: distance, lat: coords.lat, lng: coords.lon, location_source: coords.source || 'UNKNOWN', home_radius_m: homeRadius });
-            addLog('🏠 กลับเข้าสู่ขอบเขตบ้าน');
-        }
+    if (distanceEl) {
+        distanceEl.innerText = Number.isFinite(zone.distance)
+            ? `ห่างจากบ้าน ${zone.distance.toFixed(1)} เมตร`
+            : 'ยังประเมินระยะไม่ได้';
     }
-    lastZoneState = state;
+
+    if (!zoneEl) return;
+
+    if (zone.state === 'IN') {
+        zoneEl.innerHTML = '<span class="text-emerald-400">🏠 อยู่ในพื้นที่บ้าน</span>';
+    } else if (zone.state === 'OUT') {
+        zoneEl.innerHTML =
+            '<span class="text-amber-400">⚠️ อยู่นอกพื้นที่ • ระบบกำลังยืนยันหลายพิกัด</span>';
+    } else if (zone.state === 'UNCERTAIN') {
+        zoneEl.innerHTML =
+            '<span class="text-amber-300">◌ ใกล้ขอบเขต/ความแม่นยำยังไม่พอ</span>';
+    } else {
+        zoneEl.innerHTML =
+            '<span class="text-slate-400">ตำแหน่งยังไม่พอสำหรับตัดสินขอบเขต</span>';
+    }
 }
 
 function toggleFollowMode() {
@@ -1473,10 +1749,19 @@ async function init() {
     await fetchHomeConfigFromFirebase();
     await discoverDevices();
 
-    setInterval(() => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(), LIVE_REFRESH_MS);
+    // Live UI follows only the device selected in the dropdown.
+    setInterval(
+        () => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(),
+        LIVE_REFRESH_MS
+    );
+
+    // Telegram/geofence/offline/battery/SOS checks are independent of selection.
+    await monitorAllDeviceAlerts();
+    setInterval(monitorAllDeviceAlerts, DEVICE_ALERT_POLL_MS);
+
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
-    addLog('Dashboard v2.8 พร้อมใช้งาน');
+    addLog(`Dashboard v2.9 พร้อมใช้งาน • ติดตามแจ้งเตือน ${knownDeviceIds.length} อุปกรณ์`);
 }
 
 init();
