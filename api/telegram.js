@@ -106,10 +106,18 @@ function formatAlert(body) {
       text += `\n🎯 ความแม่นยำ: ±${Math.round(accuracy)} เมตร`;
     }
 
-    text += `\n🗺️ Google Maps: https://www.google.com/maps?q=${lat},${lng}`;
   }
 
   return text;
+}
+
+function buildMapUrl(body) {
+  const lat = finiteNumber(body.lat);
+  const lng = finiteNumber(body.lng);
+
+  if (lat === null || lng === null) return null;
+
+  return `https://www.google.com/maps?q=${lat},${lng}`;
 }
 
 export default async function handler(req, res) {
@@ -148,7 +156,21 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           chat_id: chatId,
           text,
-          disable_web_page_preview: true
+          disable_web_page_preview: true,
+          ...(buildMapUrl(body)
+            ? {
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: '📍 เปิด Google Maps',
+                        url: buildMapUrl(body)
+                      }
+                    ]
+                  ]
+                }
+              }
+            : {})
         })
       }
     );
