@@ -1,5 +1,5 @@
 // ============================================================
-// GeoBelt Dashboard v2.5
+// GeoBelt Dashboard v2.7
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
@@ -13,7 +13,6 @@ const HISTORY_ROOT = "history";
 const LEGACY_ROOT = "esp32_telemetry";
 const HOME_CONFIG_PATH = "home_config";
 const HOME_PIN_PATH = "app_settings/home_edit_pin";
-const DEVICE_COMMAND_ROOT = "commands";
 
 const LIVE_REFRESH_MS = 5000;
 const STALE_WARNING_SECONDS = 90;
@@ -301,17 +300,6 @@ function addLog(message) {
     while (el.children.length > 80) el.removeChild(el.lastChild);
 }
 
-async function requestBrowserNotifications() {
-    if ('Notification' in window) {
-        const result = await Notification.requestPermission();
-        addLog(`สิทธิ์การแจ้งเตือน: ${result}`);
-    } else {
-        addLog('เบราว์เซอร์นี้ไม่รองรับ Browser Notification');
-    }
-
-    // ปุ่มแจ้งเตือนบนเว็บใช้เป็นปุ่มทดสอบเสียงที่อุปกรณ์ด้วย
-    await sendBoardSound('WEB_ALERT');
-}
 
 function browserNotify(title, body) {
     if ('Notification' in window && Notification.permission === 'granted') {
@@ -319,42 +307,6 @@ function browserNotify(title, body) {
     }
 }
 
-async function sendBoardSound(type = 'WEB_ALERT') {
-    if (!currentDeviceId || currentDeviceId === 'legacy') {
-        alert('ยังไม่ได้เลือกอุปกรณ์');
-        return false;
-    }
-
-    const command = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        type: String(type || 'WEB_ALERT').toUpperCase(),
-        created_at: Date.now()
-    };
-
-    try {
-        await fetchFirebaseJson(
-            `${FIREBASE_DB_BASE}/${DEVICE_COMMAND_ROOT}/${encodeURIComponent(currentDeviceId)}/sound.json`,
-            {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(command)
-            }
-        );
-        addLog(`🔊 ส่งคำสั่งเสียงไปยังบอร์ด: ${command.type}`);
-        return true;
-    } catch (e) {
-        console.error('Board sound command:', e);
-        addLog('ส่งคำสั่งเสียงไปยังบอร์ดไม่สำเร็จ');
-        return false;
-    }
-}
-
-async function sendBoardAlert() {
-    return sendBoardSound('WEB_ALERT');
-}
-
-window.sendBoardSound = sendBoardSound;
-window.sendBoardAlert = sendBoardAlert;
 
 async function createAlertEvent(type, payload = {}) {
     if (!currentDeviceId) return;
@@ -891,7 +843,7 @@ function updateLiveUI(rec) {
         else if (!rec.deviceTimeValid || rec.dateKey === 'unknown-date') warnings.push('อุปกรณ์ยังไม่ได้เวลาจริงจาก NTP/GNSS/เครือข่าย');
         if (rec.stale) warnings.push('พิกัดนี้เป็น Last Known ไม่ใช่ Fix ปัจจุบัน');
         if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) warnings.push(`ไม่ได้รับข้อมูลใหม่ประมาณ ${ageSec} วินาที`);
-        if (rec.source === 'LBS') warnings.push('พิกัด LBS มีความแม่นยำต่ำ ใช้เป็นตัวเลือกสุดท้าย');
+        if (rec.source === 'LBS') warnings.push('ตำแหน่งจากเสาสัญญาณมือถืออาจคลาดเคลื่อนมาก');
         warning.innerText = warnings.join(' • ');
         warning.classList.toggle('hidden', warnings.length === 0);
     }
@@ -905,38 +857,37 @@ function updateLiveUI(rec) {
         rec.wifiConnected ? `${rec.wifiSsid || 'เชื่อมต่อ'}${rec.wifiRssi != null ? ` (${rec.wifiRssi} dBm)` : ''}` : 'ไม่ได้เชื่อม';
     document.getElementById('cellular-status').innerText = rec.cellularReady ? 'พร้อม' : 'ไม่พร้อม';
 
-    // Fields sent directly by GeoBeltTracker.ino
+    // สรุปคุณภาพพิกัดไว้ในการ์ด "ตำแหน่ง" เดียว
+    const sourceUpper = String(rec.source || 'NONE').toUpperCase();
+    const isGnss = sourceUpper === 'GNSS' || sourceUpper === 'GPS';
+
     const satEl = document.getElementById('satellite-count');
-    if (satEl) satEl.innerText = rec.satellites == null ? '--' : rec.satellites;
+    if (satEl) {
+        satEl.innerText = isGnss && rec.satellites != null ? rec.satellites : '--';
+        satEl.parentElement?.classList.toggle('hidden', !isGnss || rec.satellites == null);
+    }
 
     const fixAgeEl = document.getElementById('location-age');
     if (fixAgeEl) {
         fixAgeEl.innerText = rec.locationAgeMs == null
             ? '--'
             : rec.locationAgeMs < 1000
-                ? `${rec.locationAgeMs} ms`
-                : `${(rec.locationAgeMs / 1000).toFixed(1)} s`;
+                ? '<1 วินาที'
+                : `${Math.round(rec.locationAgeMs / 1000)} วินาที`;
+        fixAgeEl.parentElement?.classList.toggle('hidden', rec.locationAgeMs == null);
     }
 
     const validityEl = document.getElementById('location-validity');
     if (validityEl) {
-        if (!rec.valid) validityEl.innerHTML = '<span class="text-rose-400">No Fix</span>';
-        else if (rec.stale) validityEl.innerHTML = '<span class="text-amber-400">พิกัดเก่า</span>';
-        else validityEl.innerHTML = '<span class="text-emerald-400">Fix ใช้งานได้</span>';
+        if (!rec.valid) {
+            validityEl.innerHTML = '<span class="text-rose-400">● ยังไม่มีพิกัด</span>';
+        } else if (rec.stale) {
+            validityEl.innerHTML = '<span class="text-amber-400">● ใช้พิกัดล่าสุดที่เคยได้รับ</span>';
+        } else {
+            validityEl.innerHTML = '<span class="text-emerald-400">● พิกัดพร้อมใช้งาน</span>';
+        }
     }
 
-    const wifiList = Array.isArray(rec.nearbyWifi) ? rec.nearbyWifi : [];
-    const wifiCountEl = document.getElementById('nearby-wifi-count');
-    const wifiBestEl = document.getElementById('nearby-wifi-best');
-    if (wifiCountEl) wifiCountEl.innerText = wifiList.length;
-    if (wifiBestEl) {
-        const best = wifiList
-            .filter(x => Number.isFinite(Number(x?.rssi)))
-            .sort((a, b) => Number(b.rssi) - Number(a.rssi))[0];
-        wifiBestEl.innerText = best
-            ? `แรงสุด ${best.rssi} dBm • ${String(best.bssid || '').toUpperCase()}`
-            : 'ยังไม่มี BSSID';
-    }
 
     updateRawTelemetryPanel(rec);
 
@@ -1009,14 +960,14 @@ function updateRawTelemetryPanel(rec) {
 
     if (summary) {
         summary.innerHTML = [
-            `Device: <b>${escapeHtml(rec.deviceId || currentDeviceId || '-')}</b>`,
-            `Firmware: <b>${escapeHtml(rec.firmwareVersion || '-')}</b>`,
-            `History date: <b>${escapeHtml(rec.dateKey || '-')}</b>`,
-            `Uptime: <b>${formatDuration(rec.uptimeMs)}</b>`,
-            `Time: <b>${escapeHtml(rec.timestampSource || 'NONE')}</b>${rec.timestampFallback ? ' <span class="text-amber-400">(Firebase fallback)</span>' : ''}`,
-            `SOS: <b class="${rec.sos ? 'text-rose-400' : 'text-emerald-400'}">${rec.sos ? 'TRUE' : 'false'}</b>`,
-            `Location source: <b>${escapeHtml(rec.source || 'NONE')}</b>`,
-            `Network: <b>${rec.wifiConnected ? 'Wi‑Fi' : (rec.cellularReady ? '4G ready' : 'offline')}</b>`
+            `อุปกรณ์: <b>${escapeHtml(rec.deviceId || currentDeviceId || '-')}</b>`,
+            `เฟิร์มแวร์: <b>${escapeHtml(rec.firmwareVersion || '-')}</b>`,
+            `วันที่จัดเก็บ: <b>${escapeHtml(rec.dateKey || '-')}</b>`,
+            `ทำงานต่อเนื่อง: <b>${formatDuration(rec.uptimeMs)}</b>`,
+            `แหล่งเวลา: <b>${escapeHtml(rec.timestampSource || 'NONE')}</b>${rec.timestampFallback ? ' <span class="text-amber-400">(ใช้เวลาที่ Firebase รับข้อมูล)</span>' : ''}`,
+            `SOS: <b class="${rec.sos ? 'text-rose-400' : 'text-emerald-400'}">${rec.sos ? 'มีการแจ้งเตือน' : 'ปกติ'}</b>`,
+            `แหล่งพิกัด: <b>${escapeHtml(sourceFriendly(rec.source))}</b>`,
+            `เครือข่าย: <b>${rec.wifiConnected ? 'Wi‑Fi' : (rec.cellularReady ? '4G พร้อม' : 'ออฟไลน์')}</b>`
         ].join('<br>');
     }
 
@@ -1069,11 +1020,11 @@ function updateBattery(v) {
 
 function sourceFriendly(s) {
     s = String(s || 'NONE').toUpperCase();
-    if (s === 'GNSS' || s === 'GPS') return '🛰️ GNSS';
-    if (s.includes('GOOGLE')) return '📍 Google Geolocation';
-    if (s === 'LAST_KNOWN') return '🕘 Last Known';
-    if (s === 'LBS') return '📡 LBS';
-    return '— No Fix';
+    if (s === 'GNSS' || s === 'GPS') return '🛰️ ดาวเทียม GNSS';
+    if (s.includes('GOOGLE')) return '📍 ตำแหน่งจากเครือข่าย';
+    if (s === 'LAST_KNOWN') return '🕘 พิกัดล่าสุด';
+    if (s === 'LBS') return '📡 เสาสัญญาณมือถือ';
+    return '— ยังไม่มีพิกัด';
 }
 
 function sourceClass(s) {
@@ -1098,14 +1049,12 @@ function checkGeofence(coords) {
     if (lastZoneState && lastZoneState !== state) {
         if (state === 'OUT') {
             browserNotify('GeoBelt', `อุปกรณ์ออกนอกพื้นที่บ้าน ${distance.toFixed(0)} เมตร`);
-            sendBoardSound('GEOFENCE_OUT');
             createAlertEvent('GEOFENCE_OUT', { distance_m: distance, lat: coords.lat, lng: coords.lon, location_source: coords.source || 'UNKNOWN', home_radius_m: homeRadius });
-            addLog(`🚨 ออกจากขอบเขตบ้าน (${distance.toFixed(1)} ม.) • สั่งเสียงเตือนดังที่บอร์ด`);
+            addLog(`🚨 ออกจากขอบเขตบ้าน (${distance.toFixed(1)} ม.)`);
         } else {
             browserNotify('GeoBelt', 'อุปกรณ์กลับเข้าสู่พื้นที่บ้าน');
-            sendBoardSound('GEOFENCE_IN');
             createAlertEvent('GEOFENCE_IN', { distance_m: distance, lat: coords.lat, lng: coords.lon, location_source: coords.source || 'UNKNOWN', home_radius_m: homeRadius });
-            addLog('🏠 กลับเข้าสู่ขอบเขตบ้าน • สั่งเสียงติ๊ดเบาที่บอร์ด');
+            addLog('🏠 กลับเข้าสู่ขอบเขตบ้าน');
         }
     }
     lastZoneState = state;
@@ -1137,6 +1086,59 @@ function openGoogleMaps() {
     if (!lastDeviceCoords) return alert('ยังไม่มีพิกัด');
     window.open(`https://www.google.com/maps?q=${lastDeviceCoords.lat},${lastDeviceCoords.lon}`, '_blank', 'noopener');
 }
+
+
+async function shareLocation() {
+    if (!lastDeviceCoords) {
+        alert('ยังไม่มีพิกัด');
+        return;
+    }
+
+    const lat = lastDeviceCoords.lat.toFixed(6);
+    const lon = lastDeviceCoords.lon.toFixed(6);
+    const url = `https://www.google.com/maps?q=${lat},${lon}`;
+
+    const shareData = {
+        title: 'ตำแหน่ง GeoBelt',
+        text: `ตำแหน่งอุปกรณ์: ${lat}, ${lon}`,
+        url
+    };
+
+    try {
+        if (navigator.share) {
+            await navigator.share(shareData);
+        } else {
+            await navigator.clipboard.writeText(url);
+            addLog('คัดลอกลิงก์ตำแหน่งแล้ว');
+            alert('คัดลอกลิงก์ตำแหน่งแล้ว');
+        }
+    } catch (e) {
+        if (e?.name !== 'AbortError') {
+            console.warn('shareLocation:', e);
+        }
+    }
+}
+
+async function toggleMapFullscreen() {
+    const mapEl = document.getElementById('map');
+    if (!mapEl) return;
+
+    try {
+        if (!document.fullscreenElement) {
+            await mapEl.requestFullscreen();
+        } else {
+            await document.exitFullscreen();
+        }
+
+        setTimeout(() => map.invalidateSize(), 120);
+    } catch (e) {
+        console.warn('fullscreen:', e);
+    }
+}
+
+document.addEventListener('fullscreenchange', () => {
+    setTimeout(() => map.invalidateSize(), 120);
+});
 
 async function refreshNow() {
     if (!currentDeviceId) return;
@@ -1475,7 +1477,7 @@ async function init() {
     setInterval(() => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(), LIVE_REFRESH_MS);
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
-    addLog('ระบบ Dashboard v2.4 พร้อมใช้งาน • Telegram alert queue พร้อม');
+    addLog('Dashboard v2.7 พร้อมใช้งาน');
 }
 
 init();

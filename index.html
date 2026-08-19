@@ -36,7 +36,7 @@
                 </div>
                 <div>
                     <h1 class="text-xl md:text-2xl font-extrabold theme-text-primary">GeoBelt</h1>
-                    <p class="text-xs md:text-sm text-slate-400">ระบบติดตามตำแหน่งสำหรับผู้ดูแล</p>
+                    <p class="text-xs md:text-sm text-slate-400">เข็มขัดกำหนดขอบเขตการเคลื่อนที่</p>
                 </div>
             </div>
 
@@ -45,13 +45,7 @@
                     class="theme-input border theme-border rounded-xl px-3 py-2 text-xs min-w-[150px]">
                     <option value="">กำลังค้นหาอุปกรณ์...</option>
                 </select>
-
-                <button onclick="requestBrowserNotifications()"
-                    class="toolbar-btn" title="เปิดการแจ้งเตือนบนเบราว์เซอร์">
-                    🔔 <span class="hidden sm:inline">แจ้งเตือน</span>
-                </button>
-
-                <button onclick="toggleTheme()" class="toolbar-btn">
+<button onclick="toggleTheme()" class="toolbar-btn">
                     <span id="theme-icon">☀️</span>
                     <span id="theme-text" class="hidden sm:inline">โหมดสว่าง</span>
                 </button>
@@ -69,10 +63,10 @@
         </div>
     </header>
 
-    <!-- Overview -->
-    <section class="grid grid-cols-2 lg:grid-cols-6 gap-3 md:gap-4 mb-5">
+    <!-- Overview: แสดงเฉพาะข้อมูลที่ผู้ดูแลต้องใช้จริง -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 md:gap-4 mb-5">
         <div class="dashboard-card theme-card rounded-2xl p-4 border-l-4 border-emerald-500">
-            <p class="metric-label">แบตเตอรี่โมเด็ม</p>
+            <p class="metric-label">แบตเตอรี่อุปกรณ์</p>
             <div class="flex items-end gap-1 mt-2">
                 <span id="batt-val" class="metric-value">--</span>
                 <span class="text-sm text-slate-400 mb-1">%</span>
@@ -83,13 +77,20 @@
         </div>
 
         <div class="dashboard-card theme-card rounded-2xl p-4 border-l-4 border-blue-500">
-            <p class="metric-label">แหล่งพิกัด</p>
+            <p class="metric-label">ตำแหน่ง</p>
             <p id="location-source" class="metric-value text-xl mt-2">--</p>
-            <p id="accuracy-text" class="text-xs text-slate-400 mt-1">ความแม่นยำ: --</p>
+            <div class="mt-2 space-y-1 text-xs text-slate-400">
+                <div id="location-validity">กำลังตรวจสอบ...</div>
+                <div id="accuracy-text">ความแม่นยำ: --</div>
+                <div class="flex flex-wrap gap-x-3 gap-y-1">
+                    <span>🛰️ <span id="satellite-count">--</span> ดาวเทียม</span>
+                    <span>⏱️ Fix <span id="location-age">--</span></span>
+                </div>
+            </div>
         </div>
 
         <div class="dashboard-card theme-card rounded-2xl p-4 border-l-4 border-cyan-500">
-            <p class="metric-label">เครือข่าย</p>
+            <p class="metric-label">การเชื่อมต่อ</p>
             <div class="mt-2 space-y-1 text-sm">
                 <div>📶 Wi‑Fi: <span id="wifi-status">--</span></div>
                 <div>📡 4G: <span id="cellular-status">--</span></div>
@@ -100,21 +101,6 @@
             <p class="metric-label">ขอบเขตบ้าน</p>
             <p id="home-zone-status" class="font-bold mt-2">กำลังตรวจสอบ...</p>
             <p id="distance-text" class="text-xs text-slate-400 mt-1">--</p>
-        </div>
-
-        <div class="dashboard-card theme-card rounded-2xl p-4 border-l-4 border-indigo-500">
-            <p class="metric-label">GNSS / พิกัด</p>
-            <div class="mt-2 space-y-1 text-xs">
-                <div>🛰️ ดาวเทียม: <span id="satellite-count">--</span></div>
-                <div>⏱️ อายุ Fix: <span id="location-age">--</span></div>
-                <div>📌 สถานะ: <span id="location-validity">--</span></div>
-            </div>
-        </div>
-
-        <div class="dashboard-card theme-card rounded-2xl p-4 border-l-4 border-sky-500">
-            <p class="metric-label">Wi‑Fi รอบตัว</p>
-            <p id="nearby-wifi-count" class="metric-value text-xl mt-2">--</p>
-            <p id="nearby-wifi-best" class="text-xs text-slate-400 mt-1 truncate">ยังไม่มีข้อมูล</p>
         </div>
     </section>
 
@@ -135,6 +121,9 @@
                     </button>
                     <button onclick="copyCoordinates()" class="toolbar-btn">📋 คัดลอก</button>
                     <button onclick="openGoogleMaps()" class="toolbar-btn">↗️ Google Maps</button>
+                    <button onclick="shareLocation()" class="toolbar-btn">↗ แชร์</button>
+                    <button onclick="toggleMapFullscreen()" class="toolbar-btn">⛶ เต็มจอ</button>
+                    <button onclick="refreshNow()" class="toolbar-btn">🔄 รีเฟรช</button>
                 </div>
             </div>
 
@@ -176,19 +165,11 @@
 
             <div class="theme-card border theme-border rounded-3xl p-5 shadow-xl">
                 <div class="flex justify-between items-center mb-3">
-                    <h2 class="font-bold theme-text-primary">📜 เหตุการณ์</h2>
-                    <button onclick="openHistoryModal()" class="primary-btn text-xs">📊 ประวัติ</button>
+                    <h2 class="font-bold theme-text-primary">📜 เหตุการณ์ล่าสุด</h2>
+                    <button onclick="openHistoryModal()" class="primary-btn text-xs">📊 ดูย้อนหลัง</button>
                 </div>
                 <div id="activity-log" class="activity-log">
                     <div class="text-slate-500">ระบบเริ่มต้น...</div>
-                </div>
-            </div>
-
-            <div class="theme-card border theme-border rounded-3xl p-5 shadow-xl">
-                <h2 class="font-bold theme-text-primary mb-3">⚡ คำสั่งด่วน</h2>
-                <div class="grid grid-cols-2 gap-2">
-                    <button onclick="centerToDevice()" class="toolbar-btn">🎯 ไปที่อุปกรณ์</button>
-                    <button onclick="refreshNow()" class="toolbar-btn">🔄 รีเฟรช</button>
                 </div>
             </div>
         </div>
@@ -197,11 +178,11 @@
     <section class="theme-card border theme-border rounded-3xl p-4 md:p-5 shadow-xl mb-5">
         <details>
             <summary class="cursor-pointer font-bold theme-text-primary select-none">
-                🧪 ข้อมูล Telemetry ล่าสุดจากบอร์ด
+                🔧 รายละเอียดทางเทคนิค
             </summary>
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
                 <div>
-                    <p class="text-xs text-slate-400 mb-2">ข้อมูลสรุป</p>
+                    <p class="text-xs text-slate-400 mb-2">สำหรับตรวจสอบระบบเมื่อมีปัญหา</p>
                     <div id="telemetry-summary" class="history-info font-mono leading-6">รอข้อมูล...</div>
                 </div>
                 <div>
@@ -304,7 +285,7 @@
     </div>
 </div>
 
-<footer class="text-center py-5 text-xs text-slate-500">GeoBelt © 2026 • Dashboard v2.1</footer>
+<footer class="text-center py-5 text-xs text-slate-500">GeoBelt © 2026 • Dashboard v2.7</footer>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="app.js"></script>
