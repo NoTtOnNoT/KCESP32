@@ -1,5 +1,5 @@
 // ============================================================
-// GeoBelt Dashboard v2.10
+// GeoBelt Dashboard v2.11
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
@@ -183,6 +183,88 @@ function recordOrderTimeMs(rec) {
     // Push time represents when Firebase actually received/created the record and is
     // therefore the safest value for deciding which record is the newest.
     return rec?.receivedAtMs || rec?.timestampMs || decodePushIdTimestamp(rec?.key) || 0;
+}
+
+
+// ---------------- Data-age helpers ----------------
+// "อายุข้อมูล" ต้องหมายถึงเวลาตั้งแต่ Firebase ได้รับ record ล่าสุด
+// ไม่ใช่เวลาบนนาฬิกา ESP32 เพราะนาฬิกาบอร์ดอาจคลาดเคลื่อนหรือยัง sync ไม่เสร็จ.
+function recordFreshnessBaseMs(rec) {
+    return rec?.receivedAtMs ||
+        decodePushIdTimestamp(rec?.key) ||
+        rec?.timestampMs ||
+        0;
+}
+
+function recordAgeSeconds(rec, now = Date.now()) {
+    const baseMs = recordFreshnessBaseMs(rec);
+    if (!baseMs) return null;
+
+    const diff = now - baseMs;
+
+    // อนุโลม future เล็กน้อยจาก clock jitter แต่ไม่ให้แสดงอายุติดลบ
+    if (diff < -FUTURE_TIME_TOLERANCE_MS) return null;
+    return Math.max(0, Math.floor(diff / 1000));
+}
+
+function currentLocationAgeMs(rec, now = Date.now()) {
+    if (!rec || rec.locationAgeMs == null) return null;
+
+    const reportedAge = Math.max(0, Number(rec.locationAgeMs) || 0);
+    const receivedMs = rec.receivedAtMs || decodePushIdTimestamp(rec.key) || 0;
+
+    // location.age_ms คืออายุ fix ตอน ESP32 สร้าง telemetry.
+    // เพิ่มเวลาที่ผ่านไปหลัง Firebase รับ record เพื่อให้ "อายุ Fix" เดินต่อจริง.
+    const sinceReceive = receivedMs ? Math.max(0, now - receivedMs) : 0;
+    return reportedAge + sinceReceive;
+}
+
+function formatAgeSeconds(sec) {
+    if (sec == null || !Number.isFinite(sec)) return '-';
+    if (sec < 1) return '<1 วินาที';
+    if (sec < 60) return `${Math.floor(sec)} วินาที`;
+    const min = Math.floor(sec / 60);
+    const rem = Math.floor(sec % 60);
+    if (min < 60) return rem ? `${min} นาที ${rem} วินาที` : `${min} นาที`;
+    const hr = Math.floor(min / 60);
+    const minRem = min % 60;
+    return minRem ? `${hr} ชม. ${minRem} นาที` : `${hr} ชม.`;
+}
+
+function refreshAgeLabels() {
+    if (!latestRecord) return;
+
+    const now = Date.now();
+    const ageSec = recordAgeSeconds(latestRecord, now);
+
+    const dataAgeEl = document.getElementById('data-age');
+    if (dataAgeEl) {
+        dataAgeEl.innerText = ageSec == null
+            ? 'อายุข้อมูล: -'
+            : `อายุข้อมูล: ${formatAgeSeconds(ageSec)}`;
+    }
+
+    const fixAgeEl = document.getElementById('location-age');
+    if (fixAgeEl) {
+        const fixAgeMs = currentLocationAgeMs(latestRecord, now);
+
+        if (fixAgeMs == null) {
+            fixAgeEl.innerText = '--';
+            fixAgeEl.parentElement?.classList.add('hidden');
+        } else {
+            fixAgeEl.innerText = formatAgeSeconds(fixAgeMs / 1000);
+            fixAgeEl.parentElement?.classList.remove('hidden');
+        }
+    }
+
+    // ให้สถานะ Online/Stale/Offline เปลี่ยนตามเวลาได้แม้ไม่มี request รอบใหม่
+    if (ageSec != null) {
+        if (ageSec > OFFLINE_WARNING_SECONDS) {
+            setStatus('อุปกรณ์ออฟไลน์/ข้อมูลเก่า', 'offline');
+        } else if (ageSec > STALE_WARNING_SECONDS) {
+            setStatus('ข้อมูลเริ่มเก่า', 'stale');
+        }
+    }
 }
 
 // ---------------- Exact ESP32 telemetry schema ----------------
@@ -1171,12 +1253,13 @@ async function fetchLegacyLatest() {
 
 function updateLiveUI(rec) {
     const now = Date.now();
+
+    // เวลาแสดงผลยังใช้เวลาของอุปกรณ์เมื่อเชื่อถือได้
+    // แต่อายุข้อมูลใช้ Firebase receive time เพื่อบอก freshness จริง.
     const displayTimestampMs = rec.timestampMs || rec.receivedAtMs || 0;
-    const futureOffsetMs = displayTimestampMs ? displayTimestampMs - now : 0;
-    const hasBadFutureTime = displayTimestampMs && futureOffsetMs > FUTURE_TIME_TOLERANCE_MS;
-    const ageSec = displayTimestampMs && !hasBadFutureTime
-        ? Math.max(0, Math.floor((now - displayTimestampMs) / 1000))
-        : null;
+    const futureOffsetMs = rec.deviceTimestampMs ? rec.deviceTimestampMs - now : 0;
+    const hasBadFutureTime = rec.deviceTimestampMs && futureOffsetMs > FUTURE_TIME_TOLERANCE_MS;
+    const ageSec = recordAgeSeconds(rec, now);
 
     if (hasBadFutureTime) setStatus('เวลาอุปกรณ์ผิดปกติ', 'stale');
     else if (ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS) setStatus('อุปกรณ์ออฟไลน์/ข้อมูลเก่า', 'offline');
@@ -1221,12 +1304,11 @@ function updateLiveUI(rec) {
 
     const fixAgeEl = document.getElementById('location-age');
     if (fixAgeEl) {
-        fixAgeEl.innerText = rec.locationAgeMs == null
+        const fixAgeMs = currentLocationAgeMs(rec, now);
+        fixAgeEl.innerText = fixAgeMs == null
             ? '--'
-            : rec.locationAgeMs < 1000
-                ? '<1 วินาที'
-                : `${Math.round(rec.locationAgeMs / 1000)} วินาที`;
-        fixAgeEl.parentElement?.classList.toggle('hidden', rec.locationAgeMs == null);
+            : formatAgeSeconds(fixAgeMs / 1000);
+        fixAgeEl.parentElement?.classList.toggle('hidden', fixAgeMs == null);
     }
 
     const validityEl = document.getElementById('location-validity');
@@ -1246,7 +1328,7 @@ function updateLiveUI(rec) {
     const displayTime = displayTimestampMs ? new Date(displayTimestampMs).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' }) : '-';
     const timeSuffix = rec.timestampFallback ? ' (เวลารับข้อมูล)' : '';
     document.getElementById('last-update').innerText = `อัปเดตล่าสุด: ${displayTime}${timeSuffix}`;
-    document.getElementById('data-age').innerText = ageSec === null ? 'อายุข้อมูล: -' : `อายุข้อมูล: ${ageSec} วินาที`;
+    document.getElementById('data-age').innerText = ageSec === null ? 'อายุข้อมูล: -' : `อายุข้อมูล: ${formatAgeSeconds(ageSec)}`;
 
     const timeSourceEl = document.getElementById('time-source');
     if (timeSourceEl) timeSourceEl.innerText = rec.timestampFallback
@@ -1654,7 +1736,7 @@ function selectHistoryRow(index) {
         <div class="mt-1">🕒 ${recordTimeString(rec)} • ${escapeHtml(rec.timestampSource || 'NONE')}${rec.timestampFallback ? ' (เวลารับข้อมูล)' : ''}</div>
         <div class="mt-1">📍 ${rec.lat.toFixed(6)}, ${rec.lon.toFixed(6)}</div>
         <div class="mt-1">${sourceFriendly(rec.source)} ${Number.isFinite(rec.accuracy) ? `• ±${Math.round(rec.accuracy)} ม.` : ''}</div>
-        <div class="mt-1">🛰️ ดาวเทียม: ${rec.satellites ?? '-'} • อายุ Fix: ${rec.locationAgeMs == null ? '-' : (rec.locationAgeMs / 1000).toFixed(1) + ' s'}</div>
+        <div class="mt-1">🛰️ ดาวเทียม: ${rec.satellites ?? '-'} • อายุ Fix ตอนบันทึก: ${rec.locationAgeMs == null ? '-' : formatAgeSeconds(rec.locationAgeMs / 1000)}</div>
         <div class="mt-1">📶 Wi‑Fi: ${rec.wifiConnected ? escapeHtml(rec.wifiSsid || 'เชื่อมต่อ') : 'ไม่เชื่อม'} • 4G: ${rec.cellularReady ? 'พร้อม' : 'ไม่พร้อม'}</div>
         <div class="mt-1">🔋 ${Number.isFinite(Number(rec.battery)) ? Math.round(Number(rec.battery)) + '%' : '-'}</div>
     `;
@@ -1851,7 +1933,11 @@ async function init() {
 
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
-    addLog(`Dashboard v2.10 พร้อมใช้งาน • ติดตามแจ้งเตือน ${knownDeviceIds.length} อุปกรณ์`);
+    // อัปเดตตัวเลข "อายุข้อมูล" และ "อายุ Fix" ทุก 1 วินาที
+    // โดยไม่ต้องรอรอบโหลด Firebase 5 วินาที.
+    setInterval(refreshAgeLabels, 1000);
+
+    addLog(`Dashboard v2.11 พร้อมใช้งาน • ติดตามแจ้งเตือน ${knownDeviceIds.length} อุปกรณ์`);
 }
 
 init();
