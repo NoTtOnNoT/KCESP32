@@ -1,5 +1,5 @@
 // ============================================================
-// GeoBelt Dashboard v2.7
+// GeoBelt Dashboard v2.8
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
@@ -224,9 +224,7 @@ function exactBoardRecord(raw, key = '', dateKey = '') {
         stale: loc.stale === true,
         accuracy: nullableNumber(loc.accuracy_m),
         locationAgeMs: nullableNumber(loc.age_ms),
-        satellites: nullableNumber(loc.satellites),
-
-        nearbyWifi: Array.isArray(raw.nearby_wifi) ? raw.nearby_wifi : []
+        satellites: nullableNumber(loc.satellites)
     };
 }
 
@@ -569,7 +567,7 @@ function normalizeRecord(raw, key = '', dateKey = '') {
         sos: !!raw.sos,
         wifiConnected: false, wifiSsid: '', wifiRssi: null,
         cellularReady: false,
-        locationAgeMs: null, satellites: null, nearbyWifi: []
+        locationAgeMs: null, satellites: null
     };
 }
 
@@ -967,7 +965,8 @@ function updateRawTelemetryPanel(rec) {
             `แหล่งเวลา: <b>${escapeHtml(rec.timestampSource || 'NONE')}</b>${rec.timestampFallback ? ' <span class="text-amber-400">(ใช้เวลาที่ Firebase รับข้อมูล)</span>' : ''}`,
             `SOS: <b class="${rec.sos ? 'text-rose-400' : 'text-emerald-400'}">${rec.sos ? 'มีการแจ้งเตือน' : 'ปกติ'}</b>`,
             `แหล่งพิกัด: <b>${escapeHtml(sourceFriendly(rec.source))}</b>`,
-            `เครือข่าย: <b>${rec.wifiConnected ? 'Wi‑Fi' : (rec.cellularReady ? '4G พร้อม' : 'ออฟไลน์')}</b>`
+            `เครือข่าย: <b>${rec.wifiConnected ? 'Wi‑Fi' : (rec.cellularReady ? '4G พร้อม' : 'ยังไม่พร้อม')}</b>`,
+                `โมเด็ม: <b>${rec.modemPresent ? 'ตอบสนอง' : 'ไม่พร้อม'}</b> • SIM: <b>${rec.simReady ? 'พร้อม' : 'ไม่พร้อม'}</b>`
         ].join('<br>');
     }
 
@@ -1477,7 +1476,7 @@ async function init() {
     setInterval(() => currentDeviceId === 'legacy' ? fetchLegacyLatest() : fetchLatestRecord(), LIVE_REFRESH_MS);
     setInterval(fetchHomeConfigFromFirebase, 30000);
 
-    addLog('Dashboard v2.7 พร้อมใช้งาน');
+    addLog('Dashboard v2.8 พร้อมใช้งาน');
 }
 
 init();
