@@ -1,5 +1,5 @@
 // ============================================================
-// GeoBelt Dashboard v2.11
+// GeoBelt Dashboard v2.12
 // - New history layout: /history/<deviceId>/<YYYY-MM-DD>/<pushId>
 // - Loads one day at a time (no 3,000-record global cap)
 // - Legacy /esp32_telemetry can still be loaded page-by-page
@@ -14,9 +14,10 @@ const LEGACY_ROOT = "esp32_telemetry";
 const HOME_CONFIG_PATH = "home_config";
 const HOME_PIN_PATH = "app_settings/home_edit_pin";
 
-const LIVE_REFRESH_MS = 5000;
-const STALE_WARNING_SECONDS = 90;
-const OFFLINE_WARNING_SECONDS = 180;
+const LIVE_REFRESH_MS = 2000;
+const STALE_WARNING_SECONDS = 15;
+const CONNECTION_WARNING_SECONDS = 30;
+const OFFLINE_WARNING_SECONDS = 90;
 const FUTURE_TIME_TOLERANCE_MS = 5 * 60 * 1000;
 const MIN_VALID_TELEMETRY_MS = Date.UTC(2024, 0, 1);
 const LIVE_DATE_CANDIDATE_LIMIT = 4;
@@ -25,7 +26,7 @@ const LOW_BATTERY_ALERT_PERCENT = 20;
 const TELEGRAM_ALERTS_ENABLED = true;
 
 // Multi-device alert monitoring
-const DEVICE_ALERT_POLL_MS = 5000;
+const DEVICE_ALERT_POLL_MS = 3000;
 const CRITICAL_BATTERY_ALERT_PERCENT = 10;
 
 // Geofence protection against false alarms.
@@ -261,8 +262,12 @@ function refreshAgeLabels() {
     if (ageSec != null) {
         if (ageSec > OFFLINE_WARNING_SECONDS) {
             setStatus('อุปกรณ์ออฟไลน์/ข้อมูลเก่า', 'offline');
+        } else if (ageSec > CONNECTION_WARNING_SECONDS) {
+            setStatus('การเชื่อมต่อไม่เสถียร', 'stale');
         } else if (ageSec > STALE_WARNING_SECONDS) {
-            setStatus('ข้อมูลเริ่มเก่า', 'stale');
+            setStatus('ข้อมูลล่าช้า', 'stale');
+        } else {
+            setStatus('ออนไลน์', 'live');
         }
     }
 }
@@ -1263,7 +1268,8 @@ function updateLiveUI(rec) {
 
     if (hasBadFutureTime) setStatus('เวลาอุปกรณ์ผิดปกติ', 'stale');
     else if (ageSec !== null && ageSec > OFFLINE_WARNING_SECONDS) setStatus('อุปกรณ์ออฟไลน์/ข้อมูลเก่า', 'offline');
-    else if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) setStatus('ข้อมูลเริ่มเก่า', 'stale');
+    else if (ageSec !== null && ageSec > CONNECTION_WARNING_SECONDS) setStatus('การเชื่อมต่อไม่เสถียร', 'stale');
+    else if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) setStatus('ข้อมูลล่าช้า', 'stale');
     else if (rec.timestampFallback) setStatus('ออนไลน์ • ใช้เวลารับข้อมูล', 'live');
     else if (!displayTimestampMs) setStatus('ออนไลน์ • ยังไม่มีเวลาจริง', 'stale');
     else setStatus('ออนไลน์', 'live');
@@ -1277,7 +1283,11 @@ function updateLiveUI(rec) {
         if (rec.timestampFallback) warnings.push('อุปกรณ์ยังไม่มีเวลาจริง • แสดงเวลาที่ Firebase รับข้อมูลแทน');
         else if (!rec.deviceTimeValid || rec.dateKey === 'unknown-date') warnings.push('อุปกรณ์ยังไม่ได้เวลาจริงจาก NTP/GNSS/เครือข่าย');
         if (rec.stale) warnings.push('พิกัดนี้เป็น Last Known ไม่ใช่ Fix ปัจจุบัน');
-        if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) warnings.push(`ไม่ได้รับข้อมูลใหม่ประมาณ ${ageSec} วินาที`);
+        if (ageSec !== null && ageSec > CONNECTION_WARNING_SECONDS) {
+            warnings.push(`ไม่ได้รับข้อมูลใหม่ประมาณ ${formatAgeSeconds(ageSec)} • การเชื่อมต่ออาจไม่เสถียร`);
+        } else if (ageSec !== null && ageSec > STALE_WARNING_SECONDS) {
+            warnings.push(`ข้อมูลล่าช้าประมาณ ${formatAgeSeconds(ageSec)}`);
+        }
         if (rec.source === 'LBS') warnings.push('ตำแหน่งจากเสาสัญญาณมือถืออาจคลาดเคลื่อนมาก');
         warning.innerText = warnings.join(' • ');
         warning.classList.toggle('hidden', warnings.length === 0);
@@ -1937,7 +1947,7 @@ async function init() {
     // โดยไม่ต้องรอรอบโหลด Firebase 5 วินาที.
     setInterval(refreshAgeLabels, 1000);
 
-    addLog(`Dashboard v2.11 พร้อมใช้งาน • ติดตามแจ้งเตือน ${knownDeviceIds.length} อุปกรณ์`);
+    addLog(`Dashboard v2.12 พร้อมใช้งาน • ติดตามแจ้งเตือน ${knownDeviceIds.length} อุปกรณ์`);
 }
 
 init();
